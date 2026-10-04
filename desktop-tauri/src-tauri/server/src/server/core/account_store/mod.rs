@@ -116,6 +116,7 @@ pub mod officeace_accounts;
 pub mod orcaterm_accounts;
 pub mod priority;
 pub mod qoder_accounts;
+pub mod lobster_accounts;
 pub mod raccoon_accounts;
 pub mod raccoon_import;
 pub mod sql;

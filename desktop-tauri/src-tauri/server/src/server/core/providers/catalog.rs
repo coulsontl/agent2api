@@ -210,6 +210,8 @@ pub(crate) fn refresh_meta(kind: ProviderKind) -> (bool, i64) {
                 super::modelscope::models::last_refreshed_at(region),
             )
         }
+        // LobsterAI 目录在 PR-2 接 `/api/proxy/v1/models` 远程刷新前都是空
+        ProviderKind::Lobster => (false, 0),
     }
 }
 

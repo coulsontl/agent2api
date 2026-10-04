@@ -1175,6 +1175,7 @@ pub fn adapter_for(kind: ProviderKind) -> &'static dyn ProviderAdapter {
         // 所以这里 kind → region 必须逐字对应。
         ProviderKind::Modelscope => &super::modelscope::MODELSCOPE_ADAPTER,
         ProviderKind::ModelscopeIntl => &super::modelscope::MODELSCOPE_INTL_ADAPTER,
+        ProviderKind::Lobster => &super::lobster::LOBSTER_ADAPTER,
     }
 }
 

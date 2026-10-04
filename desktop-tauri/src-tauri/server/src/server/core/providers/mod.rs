@@ -162,6 +162,7 @@ pub mod onboarding_memory;
 /// （当前唯一的用户是 ZCode 活动套餐的令牌池，判据与取舍见模块头）。
 /// 不进身份体系：它是各家的共用设施，只按 provider id 记状态。
 pub mod readiness;
+pub mod lobster;
 pub mod qoder;
 pub mod raccoon;
 pub mod refresh_flight;
@@ -528,6 +529,9 @@ pub enum ProviderKind {
     /// 与 [`ProviderKind::Modelscope`] 同一套协议、不同站点（网页站与推理域都不同，
     /// 见 `modelscope::region`）。
     ModelscopeIntl,
+    /// LobsterAI（网易有道）。凭证实现见 `lobster/`。本枚举是 PR-1 接入
+    /// 注册表与添加分派的最小切片（桌面端导入 + 手动添加），转发由 PR-2 完成。
+    Lobster,
 }
 
 /// 一个提供商的静态元数据。
@@ -640,6 +644,7 @@ pub const PROVIDERS: &[ProviderMeta] = &[
     // 只给国际版加后缀会让「ModelScope」读起来像「两地通吃的那一家」。
     ProviderMeta { id: "modelscope", label: "ModelScope 国内版" },
     ProviderMeta { id: "modelscope-intl", label: "ModelScope 国际版" },
+    ProviderMeta { id: "lobster", label: "LobsterAI" },
 ];
 
 /// provider id 在注册表里的下标（未知 id → None）。
@@ -715,6 +720,7 @@ pub fn kind_from_id(id: &str) -> Option<ProviderKind> {
         "zcode" => Some(ProviderKind::Zcode),
         "zcode-intl" => Some(ProviderKind::ZcodeIntl),
         "codearts" => Some(ProviderKind::CodeArts),
+        "lobster" => Some(ProviderKind::Lobster),
         "trae" => Some(ProviderKind::Trae),
         "loomy" => Some(ProviderKind::Loomy),
         "kuku" => Some(ProviderKind::Kuku),
@@ -772,6 +778,7 @@ pub const fn kind_id(kind: ProviderKind) -> &'static str {
         ProviderKind::Chatglm => "chatglm",
         ProviderKind::Modelscope => "modelscope",
         ProviderKind::ModelscopeIntl => "modelscope-intl",
+        ProviderKind::Lobster => "lobster",
     }
 }
 

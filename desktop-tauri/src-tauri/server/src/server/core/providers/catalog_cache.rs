@@ -116,6 +116,8 @@ pub const SCOPE_MODELSCOPE_CN: &str = "modelscopeCn";
 /// 缓存必须分开，否则先刷的那一站会把另一站的清单覆盖掉，
 /// 见 `providers::modelscope::region` 的模块头）
 pub const SCOPE_MODELSCOPE_INTL: &str = "modelscopeIntl";
+/// LobsterAI（`/api/proxy/v1/models` + openclaw.json 本地回落）
+pub const SCOPE_LOBSTER: &str = "lobster";
 
 /// 全部 scope（事实来源：`cached_scopes` 按它遍历；新增一家时加在这里）。
 pub const ALL_SCOPES: &[&str] = &[
@@ -141,6 +143,7 @@ pub const ALL_SCOPES: &[&str] = &[
     SCOPE_CHATGLM,
     SCOPE_MODELSCOPE_CN,
     SCOPE_MODELSCOPE_INTL,
+    SCOPE_LOBSTER,
 ];
 
 /// 一份清单缓存

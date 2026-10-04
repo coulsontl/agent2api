@@ -367,6 +367,10 @@ impl AccountStore {
             // 层的事，公开形态不体现）。去掉令牌本体，只留尾 4 位与「有没有令牌」
             // （见 `modelscope_accounts.rs`）。
             self.to_modelscope_public_account(record)
+        } else if record.provider() == super::LOBSTER_PROVIDER_ID {
+            // LobsterAI（PR-2）：desktop / jwtExpiresAt / path 等自家字段，
+            // 凭证与转发链路见 `providers::lobster`
+            self.to_lobster_public_account(record)
         } else if record
             .provider()
             .starts_with(crate::server::core::custom_providers::ID_PREFIX)

@@ -1285,6 +1285,10 @@ pub fn implemented_kinds() -> Vec<ProviderKind> {
         // 与 WorkBuddy 国际版那条同一理由）。
         ProviderKind::Modelscope,
         ProviderKind::ModelscopeIntl,
+        // LobsterAI 在本列表里 = PR-2 已接真身（转发 / 目录 / 额度 / 签到）。
+        // 它有远程目录（`/api/proxy/v1/models` + openclaw.json 本地回落），
+        // 不在的话同样会出现"点了刷新、日志里一句 lobster 都没有"。
+        ProviderKind::Lobster,
     ]
 }
 

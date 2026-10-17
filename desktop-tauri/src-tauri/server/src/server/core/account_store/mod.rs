@@ -116,6 +116,7 @@ pub mod officeace_accounts;
 pub mod orcaterm_accounts;
 pub mod priority;
 pub mod qoder_accounts;
+pub mod lobster_accounts;
 pub mod raccoon_accounts;
 pub mod raccoon_import;
 pub mod sql;
@@ -330,4 +331,11 @@ pub(crate) fn is_qoder_family(provider_id: &str) -> bool {
 pub(crate) const RACCOON_PROVIDER_ID: &str =
     crate::server::core::providers::kind_id(
         crate::server::core::providers::ProviderKind::Raccoon,
+    );
+
+/// LobsterAI provider id（账号存储内部多处要用；**从注册表推导**，同
+/// [`RACCOON_PROVIDER_ID`] 的口径）。
+pub(crate) const LOBSTER_PROVIDER_ID: &str =
+    crate::server::core::providers::kind_id(
+        crate::server::core::providers::ProviderKind::Lobster,
     );

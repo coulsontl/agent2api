@@ -56,6 +56,73 @@ const TOKEN_BRIDGE: [(&str, fn(&Record) -> Option<u64>); 2] = [
 /// 出口就统一了，但**不删原键**：那两家转发时仍按自己的键读（理由见模块头）。
 const LEVEL_KEYS: [&str; 3] = ["reasoningLevels", "reasoningEfforts", "efforts"];
 
+/// 只应用「模型本体」那一档实测事实（不动 models.dev 的补齐）。
+///
+/// 给**没过 [`apply`] 的读路径**用：自定义家的闸门读数是
+/// `custom_providers::models_of` + 展平（见 `catalog::routing::manifest_entry_for`），
+/// 那条路径不经过本模块，于是这份事实要单独补一次。
+///
+/// 幂等：条目已经声明过该键时原样不动。
+pub fn apply_intrinsic_only(item: &mut Value) {
+    let Some(id) = item.get("id").and_then(Value::as_str).map(str::to_string) else { return };
+    let Some(object) = item.as_object_mut() else { return };
+    let mut sources = object
+        .get("capSources")
+        .and_then(Value::as_object)
+        .cloned()
+        .unwrap_or_default();
+    apply_intrinsic_facts(object, &id, &mut sources);
+    if !sources.is_empty() {
+        object.insert("capSources".to_string(), Value::Object(sources));
+    }
+}
+
+/// 把「模型本体」的实测事实写进条目，并把来源记成 `observed`。
+///
+/// **刻意排在 `snapshot::lookup` 之外**：这份事实是我们自己实测的，社区库有没有
+/// 收录这条模型与它无关。2026-10-17 的草稿把它关在 `if let Some(record)` 里面，
+/// 而 `glm-5.3` 在 models.dev 里查不到 ⇒ 整段被跳过 ⇒ 标记等于没写。
+///
+/// 上游已声明的键不动（那是这条通道的真实情况，优先级更高），只记来源。
+pub(crate) fn apply_intrinsic_facts(object: &mut Map<String, Value>, id: &str, sources: &mut Map<String, Value>) {
+    for (key, _) in BOOL_BRIDGE {
+        if object.get(key).is_some_and(|value| !value.is_null()) {
+            sources.insert(key.to_string(), json!("upstream"));
+            continue;
+        }
+        if let Some(flag) = model_intrinsic_flag(id, key) {
+            object.insert(key.to_string(), Value::Bool(flag));
+            sources.insert(key.to_string(), json!("observed"));
+        }
+    }
+}
+
+/// **模型本体**（不是某条通道）的实测能力位。
+///
+/// 与上游声明、models.dev 都不同的第三档事实：
+///   - **上游声明** = 「这条转发通道收不收」—— 各家可能不同（models.dev 记的是
+///     实验室口径，所以 `entry_refuses_images` 不认它）；
+///   - **本函数** = 「这个模型本身有没有这个能力」—— 与走哪个渠道无关，任何家
+///     拿到同一个 id 都是同一个答案。
+///
+/// 位置为什么在这里：`apply` 是「一家全部出口的唯一源头」，内置家与自定义家都
+/// 走它，所以在这一层写一次，14 家全部生效。放到某一家的 `map_entry` 里只能
+/// 修那一家（officeace 那份草稿就是反例）。
+///
+/// 判据是**精确 id**，不做前缀：`glm-5.3-flash` 能吃图，拿 `glm-5.3` 当前缀
+/// 会把它一起拦掉。每一条都必须有出处，不许凭名字猜（`glm-5` 与 `glm-5.3`
+/// 的能力就不一样）。
+fn model_intrinsic_flag(id: &str, key: &str) -> Option<bool> {
+    match (id, key) {
+        // 2026-10-17 面板实测（OfficeAce 果办）+ 2026-09-30 实测（ZCode）两处互证：
+        // 同一个模型、同一句上游原文，说明这是模型本体的口径而不是某家的：
+        //   `400 messages.content.type 参数非法，取值范围 ['text']`
+        // ZCode 那条记录在 `providers/zcode/models.rs` 的 `MODELS` 表上方。
+        ("glm-5.3", "supportsImages") => Some(false),
+        _ => None,
+    }
+}
+
 /// 把 models.dev 的值补进这条清单项（原地；上游已声明的键不动）。
 ///
 /// 调用方只有两处，都是「一家全部出口的唯一源头」：内置家的
@@ -66,37 +133,35 @@ pub fn apply(item: &mut Value) {
     let Some(id) = item.get("id").and_then(Value::as_str).map(str::to_string) else { return };
     let record = snapshot::lookup(&id);
     let mut sources: Map<String, Value> = Map::new();
+    let Some(object) = item.as_object_mut() else { return };
+    apply_intrinsic_facts(object, &id, &mut sources);
     if let Some(record) = &record {
-        if let Some(object) = item.as_object_mut() {
-            for (key, pick) in BOOL_BRIDGE {
-                match object.get(key) {
-                    // 上游声明过：岿然不动，只记来源
-                    Some(value) if !value.is_null() => {
-                        sources.insert(key.to_string(), json!("upstream"));
-                    }
-                    _ => {
-                        if let Some(flag) = pick(record) {
-                            object.insert(key.to_string(), Value::Bool(flag));
-                            sources.insert(key.to_string(), json!("modelsdev"));
-                        }
-                    }
-                }
-            }
-            for (key, pick) in TOKEN_BRIDGE {
-                match object.get(key) {
-                    Some(value) if !value.is_null() => {
-                        sources.insert(key.to_string(), json!("upstream"));
-                    }
-                    _ => {
-                        if let Some(number) = pick(record) {
-                            object.insert(key.to_string(), Value::from(number));
-                            sources.insert(key.to_string(), json!("modelsdev"));
-                        }
+        for (key, pick) in BOOL_BRIDGE {
+            match object.get(key) {
+                // 上游声明过 / 实测表已填：岿然不动（来源已在上面记好）
+                Some(value) if !value.is_null() => {}
+                _ => {
+                    if let Some(flag) = pick(record) {
+                        object.insert(key.to_string(), Value::Bool(flag));
+                        sources.insert(key.to_string(), json!("modelsdev"));
                     }
                 }
             }
         }
-    } else if let Some(object) = item.as_object() {
+        for (key, pick) in TOKEN_BRIDGE {
+            match object.get(key) {
+                Some(value) if !value.is_null() => {
+                    sources.insert(key.to_string(), json!("upstream"));
+                }
+                _ => {
+                    if let Some(number) = pick(record) {
+                        object.insert(key.to_string(), Value::from(number));
+                        sources.insert(key.to_string(), json!("modelsdev"));
+                    }
+                }
+            }
+        }
+    } else {
         // 没收录也要把上游声明记下来：管理页据此说明「这个值来自上游」，
         // 而不是显示成「没数据」。
         for key in BOOL_BRIDGE.iter().map(|(key, _)| *key).chain(TOKEN_BRIDGE.iter().map(|(key, _)| *key)) {
@@ -169,4 +234,71 @@ pub fn mark_user(item: &mut Value, keys: &[String]) {
         sources.insert(key.clone(), json!("user"));
     }
     object.insert("capSources".to_string(), Value::Object(sources));
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    use super::{apply, model_intrinsic_flag};
+
+    /// 「模型本体」那一档事实：精确 id、只对已知的键生效。
+    ///
+    /// 钉住两件事：命中的模型被标成不吃图；**同族的变体不许被前缀误伤**
+    /// （`glm-5.3-flash` 能吃图，ZCode 侧 2026-09-30 发红色 PNG 实测过）。
+    #[test]
+    fn the_intrinsic_table_is_exact_and_narrow() {
+        assert_eq!(Some(false), model_intrinsic_flag("glm-5.3", "supportsImages"));
+        assert_eq!(
+            None,
+            model_intrinsic_flag("glm-5.3-flash", "supportsImages"),
+            "flash 变体能吃图，不许被前缀误伤"
+        );
+        assert_eq!(None, model_intrinsic_flag("glm-5.3", "supportsVideo"), "只标实测过的那个键");
+        assert_eq!(None, model_intrinsic_flag("glm-5", "supportsImages"), "同族不同代，能力不一样");
+        assert_eq!(None, model_intrinsic_flag("GLM-5.3", "supportsImages"), "判据是精确 id，大小写不归一");
+    }
+
+    /// 上游没声明时，`observed` 排在 models.dev 前面并留下自己的来源标记。
+    ///
+    /// 这一条是整个改动的落点：`glm-5.3` 在 OfficeAce 的目录里本来什么能力位都没有，
+    /// 靠这里补上 `supportsImages: false` + `capSources: observed`，闸门才认得出来。
+    #[test]
+    fn an_unclaimed_key_gets_the_observed_fact_before_modelsdev() {
+        let mut item = json!({"id": "glm-5.3"});
+        apply(&mut item);
+        assert_eq!(json!(false), item["supportsImages"], "实测表要补上 false");
+        assert_eq!(
+            json!("observed"),
+            item["capSources"]["supportsImages"],
+            "来源要标 observed：它不是社区库猜的，闸门按它判"
+        );
+    }
+
+    /// 实测表**不依赖 models.dev 收录**：社区库查不到这个模型时它照样要生效。
+    ///
+    /// 这条是 2026-10-17 端到端验证时抓到的真 bug：`model_intrinsic_flag` 原先
+    /// 写在 `if let Some(record)` 里面，而 `glm-5.3` 在 models.dev 里查不到 ⇒
+    /// 整个分支被跳过 ⇒ 目录里仍然什么都不标 ⇒ 闸门照样放行。实测事实凭什么
+    /// 要被一份外部数据的存在与否卡住？现在它排在那层判断之外。
+    #[test]
+    fn the_observed_fact_does_not_depend_on_modelsdev_coverage() {
+        // 直接测「写事实」那一层：它不接收 record，从签名上就保证了与收录无关。
+        // 这正是 `glm-5.3` 的实际处境（models.dev 里没有这条）。
+        let mut item = json!({"id": "glm-5.3"});
+        let mut sources = serde_json::Map::new();
+        let object = item.as_object_mut().expect("对象");
+        super::apply_intrinsic_facts(object, "glm-5.3", &mut sources);
+        assert_eq!(json!(false), item["supportsImages"], "models.dev 没收录也挡不住实测事实");
+        assert_eq!(json!("observed"), sources["supportsImages"]);
+    }
+
+    /// 上游**自己声明过**的键，实测表不许改 —— 那是这条通道的真实情况。
+    #[test]
+    fn an_upstream_declaration_is_never_overridden() {
+        let mut item = json!({"id": "glm-5.3", "supportsImages": true});
+        apply(&mut item);
+        assert_eq!(json!(true), item["supportsImages"], "上游说能就是能，实测表不覆盖");
+        assert_eq!(json!("upstream"), item["capSources"]["supportsImages"]);
+    }
 }

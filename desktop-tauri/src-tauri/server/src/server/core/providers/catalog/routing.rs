@@ -184,6 +184,10 @@ pub struct ImageCapabilitySplit {
 /// 同一个理由用在路由上就是：它能填展示值，不能决定发给谁）。关掉该开关、或这个
 /// 模型没被收录时 `capSources` 里没有这一项，本函数行为与没有补齐层时逐字相同。
 ///
+/// **`observed` 是例外，照常参与判定**：那是 `fill::model_intrinsic_flag` 记下的
+/// 「模型本体」实测事实（与通道无关，任何家拿同一个 id 都是同一个答案），
+/// 不是社区库猜的。目前只有 `glm-5.3` 的 `supportsImages` 一条，两处实测互证。
+///
 /// 传进来的条目要先经 [`entry_with_capabilities_flattened`] 展平：自定义家的
 /// 覆盖是嵌在 `capabilities` 里的，不展平就等于看不见用户改的东西。
 pub fn entry_refuses_images(entry: &Value) -> bool {
@@ -275,10 +279,19 @@ pub fn manifest_entry_for(provider_id: &str, requested: &str) -> Option<Value> {
     }
     // 自定义家：`models_of` 给的是存储形态（能力位嵌在 `capabilities` 里），
     // 必须展平后再判，否则用户在管理页勾掉的能力对闸门不可见。
+    //
+    // ⚠️ 自定义家**不过 `model_meta::apply`**（那条路径只喂 `bindings::public_models`
+    // 这个出口视图），所以「模型本体」的实测事实必须在这里单独补一次 ——
+    // 2026-10-17 端到端验证抓到的真缺口：给自定义家登记 `glm-5.3` 后，闸门
+    // 读到的仍是「什么都不声明」，带图请求照样发出去。
     custom_providers::models_of(provider_id)
         .into_iter()
         .find(|entry| model_id(entry).eq_ignore_ascii_case(&wire))
-        .map(|entry| entry_with_capabilities_flattened(&entry))
+        .map(|entry| {
+            let mut entry = entry_with_capabilities_flattened(&entry);
+            crate::server::core::model_meta::apply_intrinsic_only(&mut entry);
+            entry
+        })
 }
 
 /// 请求含图片时，把「这个模型明确不支持识图」的候选家剔掉。
@@ -402,6 +415,15 @@ mod vision_gate {
                 "{source} 声明的 false 仍要生效"
             );
         }
+        // `observed` 是「模型本体」的实测事实（`fill::model_intrinsic_flag`），
+        // 与社区库猜的不同 —— 它照常参与判定，否则 glm-5.3 那条标记等于白写。
+        assert!(
+            entry_refuses_images(&json!({
+                "id": "glm-5.3", "supportsImages": false,
+                "capSources": {"supportsImages": "observed"}
+            })),
+            "observed 是实测事实，与 modelsdev 的猜测不是一回事"
+        );
         // 别的键有来源记录、这个键没有 → 视作清单原值，照判
         assert!(entry_refuses_images(&json!({
             "id": "m", "supportsImages": false,

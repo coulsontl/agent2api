@@ -537,6 +537,32 @@ pub(super) async fn forward_with_providers(
                         if model.is_empty() { "(默认)" } else { &model },
                     ),
                 );
+                // 收窄后一个能用的候选都不剩时，**必须由这里说明真实原因**。
+                //
+                // 判据是「收窄后的候选里还有没有任何一个有账号」，不是简单的
+                // `kept.is_empty()`：2026-10-17 实测，`glm-5.3` 被 7 家剔除后
+                // 还剩一个 `cline-pass`（目录里有、但这个用户没给它加账号），
+                // 空链判断不成立，于是请求照样往下走，最后由 `attempt_queue`
+                // 以「没有可用账号，无账号可转发：请在账号页添加并启用账号」收尾
+                // —— 用户明明有账号，只是那家不吃图，那条文案把人引去账号页白找。
+                let accounts = service.store.list_accounts();
+                let accounts = accounts.as_array().map(Vec::as_slice).unwrap_or(&[]);
+                let usable = kept.iter().any(|id| {
+                    accounts.iter().any(|account| {
+                        account.get("provider").and_then(Value::as_str) == Some(id.as_str())
+                            && account.get("enabled").and_then(Value::as_bool) != Some(false)
+                    })
+                });
+                if !usable {
+                    return Err(GatewayError::with_status(
+                        400,
+                        format!(
+                            "模型 {} 在你已添加账号的提供商里都不支持图片输入（目录标为不支持：\
+                             {refused_text}）—— 请换一个支持识图的模型，或去掉图片后重试",
+                            if model.is_empty() { "(默认)" } else { &model },
+                        ),
+                    ));
+                }
                 kept
             }
         }

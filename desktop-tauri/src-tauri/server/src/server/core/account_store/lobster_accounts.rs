@@ -464,7 +464,7 @@ mod tests {
     fn same_id_different_token_is_refused_as_another_account() {
         let (db, guard) = crate::server::db::test_temp::TempDb::open("lobster-collision");
         let store = AccountStore::with_db(Some(db));
-        let first = store
+        store
             .add_lobster_account(
                 &serde_json::json!({
                     "accessToken": "header.eyJleHAiOjE5MDAwMDAwMDB9.sig-a",

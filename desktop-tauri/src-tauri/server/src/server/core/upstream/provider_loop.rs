@@ -545,8 +545,19 @@ pub(super) async fn forward_with_providers(
                 // 空链判断不成立，于是请求照样往下走，最后由 `attempt_queue`
                 // 以「没有可用账号，无账号可转发：请在账号页添加并启用账号」收尾
                 // —— 用户明明有账号，只是那家不吃图，那条文案把人引去账号页白找。
+                // ⚠️ `list_accounts()` 返回的是**快照对象**
+                // `{currentAccountId, accounts: [...], providers: [...]}`，
+                // 不是数组 —— 直接 `as_array()` 会拿到 None，于是每一家都被判成
+                // 「没账号」，收窄后但凡有一家不吃图就把整条请求判死。
+                // 2026-10-17 生产实测：`deepseek-v4.1-flash` 只剔了 codearts 一家，
+                // 候选里 workbuddy / qoder / trae 等全都在，却被报成
+                // 「都不支持图片输入」—— 就是这个空数组造成的。
                 let accounts = service.store.list_accounts();
-                let accounts = accounts.as_array().map(Vec::as_slice).unwrap_or(&[]);
+                let accounts = accounts
+                    .get("accounts")
+                    .and_then(Value::as_array)
+                    .map(Vec::as_slice)
+                    .unwrap_or(&[]);
                 let usable = kept.iter().any(|id| {
                     accounts.iter().any(|account| {
                         account.get("provider").and_then(Value::as_str) == Some(id.as_str())

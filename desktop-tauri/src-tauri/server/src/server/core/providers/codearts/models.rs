@@ -293,14 +293,26 @@ pub fn parse_benefit(body: &str) -> Result<Vec<ModelConfig>, String> {
             description: String::new(),
             context_length: number(&entry, "context_window"),
             max_output_tokens: capped_output(&entry, "max_tokens"),
-            // 上游这份清单里**没有** `supports_images` 这个键 —— 但"没给"不等于
-            // "不知道"，本家有一条实测：2026-09-30 03:52 生产上把带图请求放行到
-            // 福利模型，三个账号（优先级 2/3/4）逐字回同一句
+            // 上游这份清单里**没有** `supports_images` 这个键 —— 那是"上游没说"，
+            // 不是"不支持"。**不要**在这里补 `Some(false)`。
+            //
+            // ── 2026-10-17 撤销此前的一次误标 ──────────────────────
+            // 先前这里写的是 `Some(false)`，依据是 2026-09-30 03:52 的一次实测：
+            // 带图请求打到福利模型，三个账号逐字回
             // `InferHub.001001020.406：The request model is not multimodal`。
-            // 所以这里是 `Some(false)`：**测出来的**不支持，不是填出来的默认值。
-            // （此前它也是 false，但那时的依据是"字段缺席就当 false"这条错推理；
-            // 类型改成 `Option<bool>` 之后，这一格才第一次有了证据。）
-            supports_images: Some(false),
+            //
+            // 那次测量的**口径错了**：它测的是「福利网关这条通道收不收图」，
+            // 却被记成了「这些模型不吃图」。两条独立证据推翻了这个推广：
+            //   · 用户实测 `glm-5.3-flash` / `deepseek-v4.1-flash` 都能识图；
+            //   · ZCode 侧 2026-09-30 发一张红色 4×4 PNG 给 `glm-5.3-flash`，
+            //     它答对了颜色（见 `zcode::models` 的 `MODELS` 表上方注释）。
+            // 上游自己的 beta 也把 `glm-5.3-flash` 那个假 false 改回了 true。
+            //
+            // 福利套餐不代理多模态是**通道**的限制，模型本体支持 —— 与
+            // `model_meta::model_intrinsic_flag` 记的那类事实不是一回事。
+            // 真要为福利源挡图，得有"同一模型走福利网关确实不行"的新实测，
+            // 并且只影响那一条通道，不能拿模型 id 去推广。
+            supports_images: None,
             // 福利网关的条目没有 `credit`（实测三个源里只有 agent 与 builtin 带），
             // 留空 = 界面那一列显示 `—`，不是"倍率为 0"。
             credit_display: String::new(),
@@ -1307,23 +1319,31 @@ mod restart_tests {
         );
     }
 
-    /// 福利源的 false 是**实测**来的，不是"字段缺席"推出来的。
+    /// 福利源**不**被标成不吃图：上游没给这个键，就是「不知道」。
     ///
-    /// 依据（2026-09-30 03:52 生产，带图请求放行到福利模型后）：三个账号逐字回
+    /// ── 为什么这条用例曾经断言的是 `Some(false)` ──────────────
+    /// 2026-09-30 03:52 有一次实测：带图请求打到福利模型，三个账号逐字回
     /// `InferHub.001001020.406：The request model is not multimodal`。
-    /// 这条用例钉住的是"这个 false 有出处"，改的时候必须连那段实测一起改。
+    /// 当时的结论是「这些模型不吃图」，于是整批福利模型都写死了 `Some(false)`。
+    ///
+    /// 2026-10-17 撤销：那次测的是「**福利网关这条通道**收不收图」，却被记成了
+    /// 「模型不吃图」。两条独立证据推翻了它 —— 用户实测 `glm-5.3-flash` /
+    /// `deepseek-v4.1-flash` 都能识图；ZCode 侧发红色 4×4 PNG 给 `glm-5.3-flash`
+    /// 它答对了颜色。上游 beta 也把那个假 false 改回了 true。
+    ///
+    /// 这条用例现在钉的是反面：**字段缺席不许被填成 false**。闸门只在明确为假时
+    /// 拦人（见 `catalog::entry_refuses_images`），拿「不知道」当「不支持」会把
+    /// 能识图的家从候选里摘掉 —— 比多撞一次 502 难查得多。
     #[test]
-    fn benefit_models_are_known_not_to_take_images_by_measurement() {
+    fn benefit_models_leave_image_capability_unknown_rather_than_asserting_false() {
         let benefit = parse_benefit(r#"{"error_code":"0000","result":{"models":[
             {"model_id":"glm-5.3-flash","model_name":"GLM-5.3-Flash","context_window":1048576,"max_tokens":393216}
         ]}}"#).expect("福利清单可解析");
         assert_eq!(
-            Some(false),
-            benefit[0].supports_images,
-            "上游清单里没有这个键，但实测过 not multimodal —— 这里是测量结果，不是默认值"
+            None, benefit[0].supports_images,
+            "上游清单里没有这个键 = 不知道；不许推广成「不支持」（2026-10-17 订正）"
         );
-        // 对照组：agent 源明确给的 false 与上面同值，但来源不同（一个是回包字段，
-        // 一个是我们的探针），所以两处各自的注释都得留着的理由也不同
+        // 对照组：agent 源**明确**给了 false —— 那是上游自己的声明，原样收下
         let agent = parse_agent_detail(
             r#"{"gpts":{"models":[{"model_alias":"GLM-5.2","model_name":"GLM-5.2","model_parameters":{"enabled":true,"display_enabled":true,"supports_images":false,"context_window":202752,"max_tokens":131072}}]}}"#,
             "zh_cn",

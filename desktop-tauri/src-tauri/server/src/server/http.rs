@@ -139,8 +139,11 @@ pub fn panel_router(state: ServerState) -> Router {
             "/api/session/login/kuku/complete",
             post(api::session::login_kuku_complete),
         )
-        // OrcaTerm 网页登录收尾：壳侧在登录窗口（官方 Web 控制台）里等到
-        // `ot_session` Cookie 出现后，把 state + 该 Cookie 一并 POST 交到这里。
+        // OrcaTerm 网页登录收尾（**兜底入口**）：正式链路是官方 OAuth —— 壳侧
+        // 把 `orcaterm://oauth_callback?session_id=…` 交给
+        // `/api/session/login/callback`，由后端 `OAuthExchangeToken` 换令牌
+        // （见 `providers/orcaterm/login.rs` 模块头）。这里留给「调用方手里已有
+        // 一枚现成令牌」的场景：把 state + 令牌一并 POST 过来，同样探活通过才落库。
         // **免鉴权**：调用方是壳侧进程（登录窗口），不带 API Key；安全性由登录
         // 任务的一次性 state 承担（与 kuku/complete 同款）。
         .route(

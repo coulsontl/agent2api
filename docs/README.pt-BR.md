@@ -10,7 +10,7 @@
 [![release](https://img.shields.io/github/v/release/aimod-cc/agent2api?include_prereleases)](https://github.com/aimod-cc/agent2api/releases/latest)
 [![docker pulls](https://img.shields.io/docker/pulls/aimodcc/agent2api)](https://hub.docker.com/r/aimodcc/agent2api)
 [![stars](https://img.shields.io/github/stars/aimod-cc/agent2api?style=flat&color=yellow)](https://github.com/aimod-cc/agent2api/stargazers)
-[![platform](https://img.shields.io/badge/platform-Windows%20%7C%20Docker-blue)](https://github.com/aimod-cc/agent2api/releases/latest)
+[![platform](https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux%20%7C%20Docker-blue)](https://github.com/aimod-cc/agent2api/releases/latest)
 
 [✨ Principais recursos](#-principais-recursos) • [💬 Comunidade e suporte](#-comunidade-e-suporte) • [🤝 Provedores compatíveis](#-provedores-compatíveis) • [🚀 Início rápido](#-início-rápido) • [🐳 Implantação com Docker](#-implantação-com-docker) • [📸 Capturas de tela](#-capturas-de-tela) • [🔧 Desenvolvimento e build](#-desenvolvimento-e-build) • [📜 Aviso de uso](#-aviso-de-uso)
 
@@ -31,7 +31,7 @@ O Agent2API reúne as contas já conectadas de vários clientes de IA em um úni
 - 📊 **Relatórios de requisições** — volume, taxa de sucesso e consumo de tokens num relance, com taxa de acerto de cache e mapa de calor de 365 dias
 - ⏰ **Tarefas agendadas** — check-in automático, manutenção de credenciais e atualização do catálogo, tudo gerenciado numa página
 - 💰 **Saldo e uso** — saldos e uso exibidos direto nas linhas das contas, com consulta concorrente entre elas
-- 🖥️ **Duas formas de rodar** — app de desktop na bandeja (sem Node) ou imagem Docker com painel e gateway na mesma porta; interface em seis idiomas
+- 🖥️ **Quatro formas de rodar** — apps de desktop para Windows, macOS e Linux na bandeja (sem Node) e a imagem Docker com painel e gateway na mesma porta (amd64 / arm64); interface em seis idiomas
 
 ## ❤️ Patrocinadores
 
@@ -73,11 +73,16 @@ Panorama dos recursos de proxy reverso por plataforma (✓ suportado · ✗ não
 | KukuAI (Baidu Wenku) | ✓ | ✗ | ✓ | ✓ | ✓ | — |
 | MonkeyCode (长亭科技, China / global) | ✓ | ✗ | ✓ | — | — | — |
 | Command Code | ✓ | ✗ | ✓ | — | — | — |
-| Antigravity (Google, Gemini) | ✓ | ✓ | ✓ | — | — | — |
+| Antigravity (Google, Gemini / Claude / GPT-OSS) | ✓ | ✓ | ✓ | — | — | — |
 | OfficeAce (Huawei Cloud, OfficeClaw) | ✓ | ✓ | ✓ | ✓ | ✓ | — |
+| OrcaTerm (Tencent Cloud) | ✓ | ✓ | ✓ | ✓ | — | — |
+| ModelScope (ModelScope.cn / ModelScope Intl) | ✓ | ✗ token não expira | ✓ somente remoto | ✓ saldo de créditos | ✓ créditos diários (chamar o endpoint de login dispara) | — |
+| Zhipu Qingyan | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
 | Provedores personalizados | ✓ | — | ✓ | — | — | — |
 
 > Nota: em Lista de modelos, ✓ significa busca automática online (algumas plataformas também mantêm uma tabela estática interna como fallback); o ZCode tem apenas a tabela estática interna. ✗ em Renovação automática do token significa que a plataforma não tem um fluxo de renovação disponível (a conta continua funcionando enquanto as credenciais forem válidas). O check-in do Qoder é somente na versão da China.
+>
+> O **Zhipu Qingyan** é o único provedor aqui que suporta um **modo visitante**: sem login — um clique obtém uma credencial que já funciona para conversar (a cota gratuita é emitida pela origem por dispositivo). A contrapartida é que uma conta de visitante não tem sistema de pontos — as colunas "Saldo" / "Check-in" / "Resgate" acima valem apenas para **contas conectadas** (cole um token ou importe o estado de login do cliente desktop); visitantes são ignorados de forma transparente.
 
 `/v1/chat/completions`, `/v1/responses`, `/v1/messages` (incl. `count_tokens`) e `/v1/models` funcionam igual para todas as plataformas; mapeamento de modelos, fila global de prioridade, fallback em 429, proxy de saída, mascaramento de impressão digital de saída e relatórios de requisições valem para todas as plataformas.
 
@@ -87,13 +92,29 @@ Panorama dos recursos de proxy reverso por plataforma (✓ suportado · ✗ não
 
 ## 🚀 Início rápido
 
-Baixe o instalador na página de [Releases](https://github.com/aimod-cc/agent2api/releases/latest) (NSIS, chinês simplificado, instala por padrão em `C:\Program Files\Agent2API` e exige aprovação de administrador durante a instalação) e basta iniciá-lo — **não é necessário instalar Node nem qualquer outro runtime**.
+A página de Releases oferece quatro formas; escolha a do seu sistema:
+
+| Forma | Artefato | Interface | Observações |
+| --- | --- | --- | --- |
+| **Desktop Windows** (recomendado) | `Agent2API_<versão>_x64-setup.exe` | Janela do app | Instalador NSIS, instala em `C:\Program Files\Agent2API` por padrão e exige aprovação de administrador |
+| **Desktop macOS** | `Agent2API_<versão>_universal.dmg` | Janela do app | Binário universal (Apple Silicon e Intel compilados separadamente e mesclados); macOS 10.15+ |
+| **Desktop Linux** | `Agent2API_<versão>_amd64.deb` ou `Agent2API_<versão>_amd64.AppImage` | Janela do app | O deb instala no sistema (requer webkit2gtk-4.1 / gtk3); o AppImage é um único arquivo autossuficiente que roda em qualquer distribuição |
+| **Docker** | `aimodcc/agent2api:latest` | **Painel no navegador** | Imagens amd64 / arm64, veja [Implantação com Docker](#-implantação-com-docker) |
+> Há também dois anexos `agent2api-server-linux-<arch>.tar.gz`: são o payload da **atualização em um clique dentro do contêiner** da versão Docker (o pacote que o painel baixa em "Baixar e atualizar"), não uma forma de implantação independente — usuários comuns não precisam se preocupar com eles.
+
+Os **apps de desktop** (Windows / macOS / Linux) bastam ser iniciados após a instalação — **não é necessário instalar Node nem qualquer outro runtime**; o gateway roda dentro do processo do aplicativo e permanece na bandeja.
 
 1. Na primeira execução, o gateway local (porta 3065) sobe dentro do processo do aplicativo e a janela principal abre. Se um diretório ou arquivo de dados de uma versão antiga for encontrado, um diálogo orienta a migração — basta seguir as instruções.
 2. Clique em "Adicionar conta" na página de Contas, escolha um provedor e siga o diálogo: entre ou preencha as credenciais (login pela web / código por SMS / colar credenciais / importar o estado de login desta máquina).
 3. Aponte o `base_url` do seu cliente OpenAI para `http://127.0.0.1:3065/v1` e preencha o `api_key` com qualquer coisa (por exemplo `sk-local`; o servidor não valida enquanto a autenticação estiver desativada).
 
 Fechar a janela apenas minimiza para a bandeja, e o gateway continua encaminhando em segundo plano; para sair de verdade, clique com o botão direito no ícone da bandeja e escolha "Sair".
+
+> **Primeira abertura no macOS**: o app dentro do dmg não tem assinatura de código nem notarização da Apple (assinar exige uma conta paga de Apple Developer — veja a explicação em `.github/workflows/build.yml`), então o Gatekeeper bloqueia a primeira execução. Libere uma vez em "Ajustes do Sistema → Privacidade e Segurança" e ele abre normalmente depois.
+>
+> **Notas do desktop Linux**: a bandeja depende de `libayatana-appindicator3` (a maioria dos ambientes traz; instale `libayatana-appindicator3-1` e reabra se o ícone não aparecer). Um AppImage precisa do bit de execução antes da primeira execução (`chmod +x`; o app o define automaticamente ao escolher "Abrir instalador"). Atualizações: o deb passa pelo instalador do sistema (ele pede sua senha uma vez), enquanto o AppImage é atualizado substituindo o arquivo.
+>
+> **Diferenças do desktop**: o "importar o estado de login desta máquina" do AutoClaw e do ChatGLM (智谱清言) só existe no Windows (ele lê texto cifrado do DPAPI, então essa seção fica oculta no macOS / Linux); os demais (Raccoon / CatPaw / Cline) leem arquivos em texto puro sob `HOME` e funcionam nas três plataformas. Bandeja, início automático, acesso pela rede local e hospedagem do painel web também funcionam no macOS / Linux.
 
 ### Verificação
 
@@ -126,6 +147,8 @@ print(resp.choices[0].message.content)
 ### Acesso pela rede local
 
 Por padrão o gateway escuta apenas `127.0.0.1`. Ao ativar "Configurações → Geral → Acesso pela rede local" ele passa a escutar todos os adaptadores e os dispositivos da rede só precisam apontar o endereço da API para o IP desta máquina (a interface mostra o endereço completo). Por segurança, é obrigatório registrar um administrador do painel antes de ativar: a API de gerenciamento passa a exigir sessão de administrador ou uma Gateway Key e, sem chave ativa, a API de encaminhamento também recusa (o fluxo cria uma chave "padrão" automaticamente). O painel web pode ser exposto à rede local opcionalmente (fechado por padrão). As mudanças valem após reiniciar.
+
+Os instaladores de desktop (Windows / macOS) já incluem a pasta `ui/` do painel web: ao ativar também a opção de expor o painel de gerenciamento à rede local, dispositivos da rede podem abrir o mesmo endereço no navegador e ver a interface de gerenciamento — a mesma interface da versão Docker. **A janela do desktop em si nunca passa pelo login web** (não existe página de login no app): ela se autentica com a primeira Gateway Key desta máquina, então ligar esse interruptor não pede login no app. A página de login web só aparece quando um navegador abre o painel.
 
 ## 🐳 Implantação com Docker
 
@@ -165,7 +188,15 @@ Variáveis de ambiente (todas opcionais):
 
 Compilar a partir do código: clone o repositório e rode `docker compose up -d --build` (a imagem contém apenas o gateway e o painel, sem toolchain Rust).
 
-**Diferenças de recursos no painel web** (todas decorrem de "não haver cliente de desktop local"): login pela web (WorkBuddy / Qoder / Cline), código por SMS e credenciais coladas funcionam plenamente; logins pela web que exigem callback nesta máquina (AutoClaw / CatPaw / Accio / CodeArts / Trae) e a "importação do estado de login local" não estão disponíveis — use credenciais coladas.
+**Diferenças de recursos no painel web** (decorrem de "não haver cliente de desktop local"): login pela web (WorkBuddy / Qoder / Cline), código por SMS e credenciais coladas funcionam plenamente; logins pela web que exigem callback nesta máquina (AutoClaw / CatPaw / Accio / CodeArts / Trae) e a "importação do estado de login local" não estão disponíveis — use credenciais coladas. Com o desktop e a opção de expor o painel ativadas, abrir no navegador mostra as mesmas diferenças: uma interface, um conjunto de regras.
+
+### Atualização dentro do contêiner (opcional)
+
+A página "Atualização de software" do painel consegue baixar e aplicar atualizações de dentro do contêiner: busca `agent2api-server-linux-<arch>.tar.gz` no Release oficial (validando o `.sha256`), substitui o executável e a pasta `ui/` e encerra o processo de forma graciosa, para que a política de `restart` suba o mesmo contêiner de novo. Controlado por `AGENT2API_SELF_UPDATE` (`1` no Dockerfile); defina `0` para atualizar apenas manualmente.
+
+Aqueles dois `agent2api-server-linux-<arch>.tar.gz` existem **apenas como payload dessa cadeia de atualização**: a CI reaproveita o caminho de compilação do Dockerfile para que o executável de dentro seja da mesma toolchain da imagem (veja o job `linux-server` em `.github/workflows/build.yml`). Não há script de instalação nem unidade systemd, e não é uma forma de implantação separada — fora de um contêiner o serviço não voltaria sozinho (a atualização troca arquivos e encerra o processo, contando com a política `restart` do Docker para subi-lo de novo).
+
+Atenção ao custo: depois de uma atualização interna, a tag da imagem e a versão realmente em execução **divergem** (`docker inspect` continua mostrando a tag antiga), e `docker compose pull && up -d` recria o contêiner na versão embutida na imagem. Se você quer versões fixas, deixe esse caminho desativado.
 
 ## 📸 Capturas de tela
 
@@ -201,6 +232,7 @@ Tendências: **taxa de acerto de cache** (linha) e **consumo de tokens** (área)
 
 - Rust >= 1.77 e o toolchain do Tauri 2 (para compilar o app desktop; no Windows também é preciso o runtime WebView2)
 - Node.js >= 18.17 (apenas para rodar `npm run tauri:*` e scripts de build do frontend; o app desktop não depende de Node em tempo de execução)
+- Plataformas alvo: desktops Windows / macOS / Linux (bundles por plataforma: NSIS no Windows, app+dmg no macOS, deb+AppImage no Linux) e servidor Docker
 
 ### Scripts comuns
 
@@ -212,13 +244,15 @@ npm run tauri:build        # Compila o instalador do desktop
 npm run build:icon         # Gera a imagem-fonte do ícone (rode após mudar o design do ícone e depois rode tauri icon)
 ```
 
-O artefato de build é `target/release/bundle/nsis/Agent2API_<versão>_x64-setup.exe` (hoje com cerca de 3,0 MB; o `src-tauri/.cargo/config.toml` aponta o `target-dir` do cargo para o `target/` na raiz do projeto).
+O artefato de build é `target/release/bundle/nsis/Agent2API_<versão>_x64-setup.exe` (cerca de 8,6 MB na 3.0; o `src-tauri/.cargo/config.toml` aponta o `target-dir` do cargo para o `target/` na raiz do projeto).
+
+O `.dmg` do macOS **só pode ser compilado no macOS** (`npm --prefix desktop-tauri run build -- --target universal-apple-darwin`) — não há compilação cruzada a partir do Windows, então o artefato oficial sai do workflow `build` da CI (`macos-latest`, dois alvos mesclados). Os pacotes do desktop Linux saem do job `linux-desktop` do mesmo workflow (deb + AppImage); as imagens Docker e os pacotes de servidor usados na atualização dentro do contêiner saem do job `linux-server`, que reaproveita o caminho de compilação do Dockerfile, de modo que o executável dentro do pacote vem da mesma toolchain da imagem.
 
 ## 📜 Aviso de uso
 
 ### Apenas para aprendizado e discussão
 
-Este projeto é um exercício prático de proxy reverso HTTP, passthrough de streaming SSE, adaptação de protocolos de múltiplos upstreams e empacotamento desktop (Tauri), e destina-se **apenas a aprendizado e pesquisa pessoal**. Não é um produto oficial e não tem qualquer vínculo, endosso ou patrocínio de Tencent e WorkBuddy / CodeBuddy, Meituan e CatPaw, SenseTime e 小浣熊, Zhipu e AutoClaw / autoglm, Alibaba e Qoder / Accio, Huawei Cloud e CodeArts / OfficeAce, ByteDance e Trae, iFlytek e Loomy, Baidu Wenku e KukuAI, 长亭科技 e MonkeyCode, Command Code, ou Google e Antigravity.
+Este projeto é um exercício prático de proxy reverso HTTP, passthrough de streaming SSE, adaptação de protocolos de múltiplos upstreams e empacotamento desktop (Tauri), e destina-se **apenas a aprendizado e pesquisa pessoal**. Não é um produto oficial e não tem qualquer vínculo, endosso ou patrocínio de Tencent e WorkBuddy / CodeBuddy, Meituan e CatPaw, SenseTime e 小浣熊, Zhipu e AutoClaw / autoglm, Alibaba e Qoder / Accio, Huawei Cloud e CodeArts / OfficeAce, ByteDance e Trae, iFlytek e Loomy, Baidu Wenku e KukuAI, 长亭科技 e MonkeyCode, Command Code, ou Google e Antigravity, ou Alibaba e ModelScope.
 
 ### Sobre o comportamento de proxy reverso
 

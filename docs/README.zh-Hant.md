@@ -10,7 +10,7 @@
 [![release](https://img.shields.io/github/v/release/aimod-cc/agent2api?include_prereleases)](https://github.com/aimod-cc/agent2api/releases/latest)
 [![docker pulls](https://img.shields.io/docker/pulls/aimodcc/agent2api)](https://hub.docker.com/r/aimodcc/agent2api)
 [![stars](https://img.shields.io/github/stars/aimod-cc/agent2api?style=flat&color=yellow)](https://github.com/aimod-cc/agent2api/stargazers)
-[![platform](https://img.shields.io/badge/platform-Windows%20%7C%20Docker-blue)](https://github.com/aimod-cc/agent2api/releases/latest)
+[![platform](https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux%20%7C%20Docker-blue)](https://github.com/aimod-cc/agent2api/releases/latest)
 
 [✨ 核心特性](#-核心特性) • [💬 社群與支援](#-社群與支援) • [🤝 支援的供應商](#-支援的供應商) • [🚀 快速開始](#-快速開始) • [🐳 Docker 部署](#-docker-部署) • [📸 介面預覽](#-介面預覽) • [🔧 開發與建置](#-開發與建置) • [📜 使用聲明](#-使用聲明)
 
@@ -31,7 +31,7 @@ Agent2API 把多家 AI 桌面客戶端裡已登入的帳號接到一起，共用
 - 📊 **請求報表** —— 請求量、成功率、Token 消耗一覽，還有快取命中率與 365 天熱力圖
 - ⏰ **排程任務** —— 自動簽到、憑證維護、模型目錄重新整理，開關與間隔在同一頁管理
 - 💰 **餘額與用量** —— 帳號列內直接看餘額與用量，支援跨帳號並行查詢
-- 🖥️ **兩種部署** —— 桌面端常駐托盤、免裝 Node；Docker 版面板與閘道同連接埠，介面六語
+- 🖥️ **四種形態** —— Windows / macOS / Linux 桌面端常駐系統匣、免裝 Node；Docker 版面板與閘道同連接埠（amd64 / arm64），介面六語
 
 ## ❤️ 贊助商
 
@@ -73,11 +73,16 @@ Agent2API 把多家 AI 桌面客戶端裡已登入的帳號接到一起，共用
 | KukuAI（百度文庫） | ✓ | ✗ | ✓ | ✓ | ✓ | — |
 | MonkeyCode（長亭科技，中國版 / 國際版） | ✓ | ✗ | ✓ | — | — | — |
 | Command Code | ✓ | ✗ | ✓ | — | — | — |
-| Antigravity（Google，Gemini） | ✓ | ✓ | ✓ | — | — | — |
+| Antigravity（Google，Gemini / Claude / GPT-OSS） | ✓ | ✓ | ✓ | — | — | — |
 | OfficeAce（華為雲果辦 / OfficeClaw） | ✓ | ✓ | ✓ | ✓ | ✓ | — |
+| OrcaTerm（騰訊雲遨馳終端） | ✓ | ✓ | ✓ | ✓ | — | — |
+| ModelScope（魔搭，國內版 / 國際版） | ✓ | ✗ 權杖長期有效 | ✓ 僅遠端 | ✓ 魔粒餘額 | ✓ 每日魔粒（呼叫登入介面即觸發） | — |
+| 智譜清言 | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
 | 自訂供應商 | ✓ | — | ✓ | — | — | — |
 
 > 註：模型清單的 ✓ 表示支援遠端自動拉取，部分平台另有內建靜態清單備援；ZCode 僅有內建靜態清單。Token 續期欄 ✗ 表示該平台沒有可用的續期介面（帳號在有效期內不受影響）。Qoder 簽到僅中國版可用。
+>
+> **智譜清言**是本專案**唯一支援「訪客模式」**的一家：不需要登入，點一下就能換到一份可直接對話的憑證（免費額度由上游按裝置發放）。代價是訪客帳號沒有積分體系 —— 上表裡的「餘額查詢 / 簽到 / 領取類」只對**登入帳號**有效（貼上權杖或匯入客戶端登入態），訪客會被如實跳過。
 
 `/v1/chat/completions`、`/v1/responses`、`/v1/messages`（含 `count_tokens`）與 `/v1/models` 對所有平台一視同仁；模型對應、全域優先順序佇列、429 降級、出口代理、出站指紋脫敏與請求報表同樣對全平台通用。
 
@@ -87,13 +92,29 @@ Agent2API 把多家 AI 桌面客戶端裡已登入的帳號接到一起，共用
 
 ## 🚀 快速開始
 
-從 [Releases](https://github.com/aimod-cc/agent2api/releases/latest) 下載安裝包（NSIS，簡體中文，預設裝到 `C:\Program Files\Agent2API`，安裝時需要管理員授權），安裝後啟動即可，**無需安裝 Node 或任何其它執行環境**。
+Releases 頁提供四種形態的產物，依你的系統挑一個：
+
+| 形態 | 產物 | 介面 | 說明 |
+| --- | --- | --- | --- |
+| **Windows 桌面端**（推薦） | `Agent2API_<版本>_x64-setup.exe` | 應用程式視窗 | NSIS 安裝包，預設裝到 `C:\Program Files\Agent2API`，安裝時需要管理員授權 |
+| **macOS 桌面端** | `Agent2API_<版本>_universal.dmg` | 應用程式視窗 | 通用二進位（Apple Silicon 與 Intel 各編一遍再合併），最低 macOS 10.15 |
+| **Linux 桌面端** | `Agent2API_<版本>_amd64.deb` 或 `Agent2API_<版本>_amd64.AppImage` | 應用程式視窗 | deb 裝進系統（依賴 webkit2gtk-4.1 / gtk3）；AppImage 免安裝單檔，任何發行版可用 |
+| **Docker** | `aimodcc/agent2api:latest` | **瀏覽器面板** | amd64 / arm64 雙架構，見 [Docker 部署](#-docker-部署) |
+> 另有兩個 `agent2api-server-linux-<arch>.tar.gz` 附件，那是 Docker 版**容器內一鍵更新**的載荷（面板「下載並更新」時取得的包），不是獨立部署形態，一般使用者不必理會。
+
+**桌面端**（Windows / macOS / Linux）安裝後啟動即可，**無需安裝 Node 或任何其它執行環境**；閘道跑在應用程式行程內，常駐系統匣。
 
 1. 首次啟動即在應用程式行程內啟動本機閘道（連接埠 3065）並開啟主視窗；若偵測到舊版本的資料目錄或資料檔案，會彈窗提示遷移，依指引操作即可。
 2. 點「帳號」頁的「新增帳號」，選供應商後依彈窗提示完成登入或填寫憑證即可（方式以彈窗為準：網頁登入 / 手機驗證碼 / 貼上憑證 / 匯入本機登入狀態）。
 3. 把 OpenAI 客戶端的 `base_url` 填成 `http://127.0.0.1:3065/v1`，`api_key` 隨便填（例如 `sk-local`，未啟用鑑權時伺服器端不校驗）。
 
 關閉視窗預設最小化到系統匣，閘道繼續在背景轉發；徹底結束請在系統匣圖示按右鍵選「結束」。
+
+> **macOS 首次開啟**：dmg 裡的應用程式未做 Apple 程式碼簽章與公證（簽章需要付費的 Apple Developer 帳號，見 `.github/workflows/build.yml` 的說明），Gatekeeper 會攔下首次啟動 —— 到「系統設定 → 隱私權與安全性」手動放行一次即可。
+>
+> **Linux 桌面端**：系統匣依賴 `libayatana-appindicator3`（多數桌面環境已內建）；若圖示不顯示，裝 `libayatana-appindicator3-1` 後重開即可。AppImage 首次執行前需要可執行位（`chmod +x`，程式在「開啟安裝包」時會自動補）。更新方式：deb 走系統安裝器（安裝時會問一次密碼），AppImage 是換檔案即升級。
+>
+> **桌面端的差異**：AutoClaw 與智譜清言的「匯入本機登入狀態」只在 Windows 可用（讀的是 Windows 的 DPAPI 密文，macOS / Linux 上整段收起）；其餘家（小浣熊 / CatPaw / Cline）讀的是 `HOME` 下的明文檔案，三個平台都可用。系統匣、開機自動啟動、區域網路存取與網頁面板代管在 macOS / Linux 上同樣支援。
 
 ### 驗證
 
@@ -126,6 +147,8 @@ print(resp.choices[0].message.content)
 ### 區域網路存取
 
 預設只監聽 `127.0.0.1`。開啟「設定 → 一般 → 區域網路存取」後改聽所有網路介面卡，區域網路裝置把 API 位址指向本機 IP 即可共用（介面會給出完整位址）。出於安全，開啟前必須註冊面板管理員：管理介面要求管理員工作階段或閘道 Key，無可用 Key 時轉發介面同樣拒絕服務（開啟流程會自動補一把「預設」Key）；也可選擇同時開放網頁面板（預設關閉）。變更重新啟動後生效。
+
+桌面端（Windows / macOS）安裝包裡就帶著網頁面板那一份 `ui/`，開啟「同時開放網頁管理面板」後區域網路裝置用瀏覽器存取同一網址即是管理介面 —— 與 Docker 版是同一份介面；**桌面視窗自己不走網頁登入**（沒有登入頁），它以本機第一把閘道 Key 作為憑證，開啟這個開關不需要你額外登入桌面端。網頁登入頁只在瀏覽器存取面板時出現。
 
 ## 🐳 Docker 部署
 
@@ -165,7 +188,15 @@ services:
 
 從原始碼建置：複製本專案後 `docker compose up -d --build`（映像裡只有閘道與面板，不含 Rust 工具鏈）。
 
-**網頁端功能差異**（源於「沒有本機桌面客戶端」）：網頁登入（WorkBuddy / Qoder / Cline）、手機驗證碼、貼上憑證完全可用；需要本機回呼的網頁登入（AutoClaw / CatPaw / Accio / CodeArts / Trae）與「匯入本機登入狀態」不可用，請改用貼上憑證。
+**網頁面板的功能差異**（源於「沒有本機桌面客戶端」）：網頁登入（WorkBuddy / Qoder / Cline）、手機驗證碼、貼上憑證完全可用；需要本機回呼的網頁登入（AutoClaw / CatPaw / Accio / CodeArts / Trae）與「匯入本機登入狀態」不可用，請改用貼上憑證。桌面端開著「同時開放網頁管理面板」時，用瀏覽器存取該面板也是這一套差異 —— 同一份介面、同一套判定。
+
+### 容器內更新（選用）
+
+面板的「軟體更新」頁在容器裡能直接「下載並更新」：下載官方 Release 裡的 `agent2api-server-linux-<arch>.tar.gz`（校驗 `.sha256`）→ 替換執行檔與 `ui/` → 行程優雅結束、由 `restart` 策略拉起同一個容器。由 `AGENT2API_SELF_UPDATE` 控制（Dockerfile 預設 `1`），設為 `0` 則只走手動升級。
+
+那兩個 `agent2api-server-linux-<arch>.tar.gz` 就是給這條更新鏈用的載荷，**用途只此一個**：CI 沿用 Dockerfile 的編譯路徑打包，讓包內執行檔與映像裡的同源同工具鏈（見 `.github/workflows/build.yml` 的 `linux-server` job）。它沒有安裝腳本、沒有 systemd 單元，也不是另一種部署方式 —— 容器外還得靠監管把服務拉回來（更新流程是「換檔案 → 結束行程」，靠 Docker 的 `restart` 策略把行程拉回來）。
+
+代價要清楚：更新後容器標籤與**實際執行的版本會漂移**（`docker inspect` 顯示的仍是舊 tag），執行 `docker compose pull && up -d` 重建容器會回到映像裡的版本。想固定版本就別開這個入口。
 
 ## 📸 介面預覽
 
@@ -201,6 +232,7 @@ services:
 
 - Rust >= 1.77 與 Tauri 2 工具鏈（編譯桌面端本體；Windows 上還需 WebView2 執行環境）
 - Node.js >= 18.17（僅用來執行 `npm run tauri:*` 與前端建置腳本，桌面端執行時不依賴 Node）
+- 目標平台：Windows / macOS / Linux 桌面端（各平台 bundle：Windows NSIS、macOS app+dmg、Linux deb+AppImage）與 Docker 伺服器
 
 ### 常用腳本
 
@@ -212,7 +244,9 @@ npm run tauri:build        # 建置桌面端安裝包
 npm run build:icon         # 產生圖示來源圖（改圖示設計後執行，再跑 tauri icon）
 ```
 
-打包產物為 `target/release/bundle/nsis/Agent2API_<版本>_x64-setup.exe`（目前約 3.0 MB；`src-tauri/.cargo/config.toml` 把 cargo 的 `target-dir` 指到了專案根的 `target/`）。
+打包產物為 `target/release/bundle/nsis/Agent2API_<版本>_x64-setup.exe`（3.0 版約 8.6 MB；`src-tauri/.cargo/config.toml` 把 cargo 的 `target-dir` 指到了專案根的 `target/`）。
+
+macOS 的 `.dmg` **只能在 macOS 上建置**（`npm --prefix desktop-tauri run build -- --target universal-apple-darwin`），無法從 Windows 交叉編譯，因此正式產物由 CI 的 `build` 工作流產出（`macos-latest` + 雙目標合併）；Linux 桌面端包由同一工作流的 `linux-desktop` job 產出（deb + AppImage）；Docker 映像與容器內更新用的伺服器包由 `linux-server` job 產出（沿用 Dockerfile 的編譯路徑，包內執行檔與映像同源同工具鏈）。
 
 ## 📜 使用聲明
 

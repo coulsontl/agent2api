@@ -10,7 +10,7 @@
 [![release](https://img.shields.io/github/v/release/aimod-cc/agent2api?include_prereleases)](https://github.com/aimod-cc/agent2api/releases/latest)
 [![docker pulls](https://img.shields.io/docker/pulls/aimodcc/agent2api)](https://hub.docker.com/r/aimodcc/agent2api)
 [![stars](https://img.shields.io/github/stars/aimod-cc/agent2api?style=flat&color=yellow)](https://github.com/aimod-cc/agent2api/stargazers)
-[![platform](https://img.shields.io/badge/platform-Windows%20%7C%20Docker-blue)](https://github.com/aimod-cc/agent2api/releases/latest)
+[![platform](https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux%20%7C%20Docker-blue)](https://github.com/aimod-cc/agent2api/releases/latest)
 
 [✨ 主な機能](#-主な機能) • [💬 コミュニティとサポート](#-コミュニティとサポート) • [🤝 対応プロバイダー](#-対応プロバイダー) • [🚀 クイックスタート](#-クイックスタート) • [🐳 Docker デプロイ](#-docker-デプロイ) • [📸 画面プレビュー](#-画面プレビュー) • [🔧 開発とビルド](#-開発とビルド) • [📜 使用に関する告知](#-使用に関する告知)
 
@@ -31,7 +31,7 @@ Agent2API は、複数の AI デスクトップクライアントでログイン
 - 📊 **リクエストレポート** —— リクエスト数・成功率・トークン消費を一覧、キャッシュヒット率と 365 日ヒートマップ付き
 - ⏰ **スケジュールタスク** —— 自動チェックイン、認証情報メンテナンス、モデルカタログ更新を 1 ページで管理
 - 💰 **残高と使用量** —— アカウント行に残高と使用量を表示、複数アカウントの一括照会にも対応
-- 🖥️ **2 つの動かし方** —— トレイ常駐のデスクトップアプリ（Node 不要）と、パネルとゲートウェイが同一ポートの Docker 版。UI は 6 言語
+- 🖥️ **4 つの形態** —— Windows / macOS / Linux のデスクトップアプリ（トレイ常駐・Node 不要）と、パネルとゲートウェイが同一ポートの Docker 版（amd64 / arm64）。UI は 6 言語
 
 ## ❤️ スポンサー
 
@@ -73,11 +73,16 @@ Agent2API は、複数の AI デスクトップクライアントでログイン
 | KukuAI（Baidu Wenku） | ✓ | ✗ | ✓ | ✓ | ✓ | — |
 | MonkeyCode（長亭科技、中国版 / 国際版） | ✓ | ✗ | ✓ | — | — | — |
 | Command Code | ✓ | ✗ | ✓ | — | — | — |
-| Antigravity（Google、Gemini） | ✓ | ✓ | ✓ | — | — | — |
+| Antigravity（Google、Gemini / Claude / GPT-OSS） | ✓ | ✓ | ✓ | — | — | — |
 | OfficeAce（Huawei Cloud、OfficeClaw） | ✓ | ✓ | ✓ | ✓ | ✓ | — |
+| OrcaTerm（Tencent Cloud） | ✓ | ✓ | ✓ | ✓ | — | — |
+| ModelScope（魔搭、中国版 / 国際版） | ✓ | ✗ トークンは長期有効 | ✓ リモートのみ | ✓ 魔粒残高 | ✓ 毎日の魔粒（ログイン API 呼び出しで発火） | — |
+| 智谱清言（Zhipu Qingyan） | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
 | カスタムプロバイダー | ✓ | — | ✓ | — | — | — |
 
 > 注：モデル一覧の ✓ はオンラインでの自動取得に対応することを意味します（一部のプラットフォームは内蔵の静的テーブルも併用）。ZCode は内蔵の静的テーブルのみです。トークン自動更新の ✗ は、そのプラットフォームに利用可能な更新の仕組みがないことを意味します（アカウントは有効期間内はそのまま利用できます）。Qoder のチェックインは中国版のみです。
+>
+> **智谱清言** は本プロジェクトで**唯一「ゲストモード」に対応**したプロバイダです。ログイン不要で、ワンクリックでそのまま会話に使える資格情報を取得できます（無料枠は上流がデバイス単位で発行します）。代わりにゲストアカウントにはポイント体系がありません —— 上表の「残高照会 / サインイン / 受け取り」は**ログイン済みアカウント**にのみ有効で（トークンを貼り付けるかクライアントのログイン状態をインポート）、ゲストではスキップされます。
 
 `/v1/chat/completions`、`/v1/responses`、`/v1/messages`（`count_tokens` を含む）と `/v1/models` はすべてのプラットフォームで同じように扱われます。モデルマッピング、グローバル優先度キュー、429 フォールバック、外向きプロキシ、送信フィンガープリントの秘匿化、リクエストレポートも全プラットフォーム共通です。
 
@@ -87,13 +92,29 @@ Agent2API は、複数の AI デスクトップクライアントでログイン
 
 ## 🚀 クイックスタート
 
-[Releases](https://github.com/aimod-cc/agent2api/releases/latest) からインストーラー（NSIS、簡体字中国語、既定では `C:\Program Files\Agent2API` にインストール、セットアップ時に管理者権限が必要）をダウンロードし、インストール後そのまま起動してください。**Node やその他のランタイムは不要です。**
+Releases には 4 つの形態の成果物があります。お使いのシステムに合わせて選んでください:
+
+| 形態 | 成果物 | インターフェース | 説明 |
+| --- | --- | --- | --- |
+| **Windows デスクトップ**（推奨） | `Agent2API_<バージョン>_x64-setup.exe` | アプリウィンドウ | NSIS インストーラー。既定では `C:\Program Files\Agent2API` にインストールされ、セットアップ時に管理者権限が必要 |
+| **macOS デスクトップ** | `Agent2API_<バージョン>_universal.dmg` | アプリウィンドウ | ユニバーサルバイナリ（Apple Silicon と Intel をそれぞれビルドして統合）。macOS 10.15 以上 |
+| **Linux デスクトップ** | `Agent2API_<バージョン>_amd64.deb` または `Agent2API_<バージョン>_amd64.AppImage` | アプリウィンドウ | deb はシステムにインストール（webkit2gtk-4.1 / gtk3 に依存）。AppImage はインストール不要の単一ファイルで、どのディストリビューションでも動作 |
+| **Docker** | `aimodcc/agent2api:latest` | **ブラウザーパネル** | amd64 / arm64 の 2 アーキテクチャ。詳しくは [Docker デプロイ](#-docker-デプロイ) |
+> 別途 `agent2api-server-linux-<arch>.tar.gz` という 2 つの添付ファイルがありますが、これは Docker 版の**コンテナ内ワンクリック更新**のペイロード（パネルの「ダウンロードして更新」が取得するパッケージ）であり、独立したデプロイ形態ではありません。通常の利用では気にする必要はありません。
+
+**デスクトップ**（Windows / macOS / Linux）はインストール後そのまま起動するだけです。**Node やその他のランタイムは不要**で、ゲートウェイはアプリのプロセス内で動き、トレイに常駐します。
 
 1. 初回起動時に、アプリのプロセス内で本機ゲートウェイ（ポート 3065）が起動し、メインウィンドウが開きます。旧バージョンのデータディレクトリやデータファイルが見つかった場合は、移行を促すダイアログが表示されるので、案内に従って操作してください。
 2. 「アカウント」ページの「アカウントを追加」をクリックし、プロバイダーを選んでダイアログの案内どおりにログインまたは認証情報を入力します（Web ログイン / SMS 認証コード / 認証情報の貼り付け / 本機のログイン状態の取り込み）。
 3. OpenAI クライアントの `base_url` に `http://127.0.0.1:3065/v1` を設定し、`api_key` は何でも構いません（例: `sk-local`。認証を有効にしていない場合、サーバー側は検証しません）。
 
 ウィンドウを閉じても既定ではトレイに最小化されるだけで、ゲートウェイはバックグラウンドで転送を続けます。完全に終了するには、トレイアイコンを右クリックして「終了」を選んでください。
+
+> **macOS での初回起動**: dmg 内のアプリには Apple のコード署名も公証も施していません（署名には有料の Apple Developer アカウントが必要です。`.github/workflows/build.yml` の説明を参照）。そのため Gatekeeper が初回起動をブロックします。「システム設定 → プライバシーとセキュリティ」で一度手動で許可してください。
+>
+> **Linux デスクトップ**: トレイは `libayatana-appindicator3` に依存します（多くのデスクトップ環境には同梱）。アイコンが表示されない場合は `libayatana-appindicator3-1` をインストールして再起動してください。AppImage は初回実行前に実行ビットが必要です（`chmod +x`。「インストーラーを開く」を選ぶと自動で付与されます）。更新方法: deb はシステムのインストーラー経由（インストール時に一度パスワードを求められます）、AppImage はファイルを差し替えるだけで更新完了です。
+>
+> **デスクトップ版の差異**: AutoClaw と智谱清言の「本機のログイン状態を取り込む」は Windows でのみ利用できます（Windows の DPAPI 暗号文を読むため、macOS / Linux ではこのセクションごと非表示になります）。ほかのプロバイダー（小浣熊 / CatPaw / Cline）は `HOME` 配下の平文ファイルを読むため、3 プラットフォームすべてで使えます。トレイ、自動起動、LAN アクセス、Web パネルのホストは macOS / Linux でも同様に利用できます。
 
 ### 動作確認
 
@@ -126,6 +147,8 @@ print(resp.choices[0].message.content)
 ### LAN アクセス
 
 既定では `127.0.0.1` のみをリッスンします。「設定 → 一般 → LAN アクセス」を有効にするとすべてのネットワークアダプターで待ち受け、LAN 内の機器は API アドレスを本機の IP に向けるだけで（画面に完全なアドレスが表示されます）アカウント群を共有できます。セキュリティのため、有効化の前にパネル管理者の登録が必要です。管理 API は管理者セッションまたはゲートウェイキーを要求し、有効なキーが無い場合は転送 API も拒否します（有効化の流れで「既定」キーが自動追加されます）。Web パネルの LAN 公開も任意で選べます（既定は非公開）。変更は再起動後に有効です。
+
+デスクトップ版（Windows / macOS）のインストーラーには Web パネルの `ui/` も同梱されています。「Web 管理パネルも公開する」を有効にすると、LAN 内の機器がブラウザーで同じアドレスを開くだけで管理画面になります —— Docker 版と同一の画面です。**デスクトップウィンドウ自体は Web ログインを通りません**（ログインページが無いため）。本機の最初のゲートウェイキーを資格情報として使うので、このスイッチを入れるのにデスクトップ側で追加のログインは不要です。Web ログインページは、ブラウザーからパネルを開いたときにだけ表示されます。
 
 ## 🐳 Docker デプロイ
 
@@ -165,7 +188,15 @@ services:
 
 ソースからビルドする場合: 本リポジトリをクローンして `docker compose up -d --build`（イメージにはゲートウェイとパネルのみが入り、Rust ツールチェーンは含まれません）。
 
-**Web パネルでの機能差**（「本機デスクトップクライアントが無い」ことに起因）: Web ログイン（WorkBuddy / Qoder / Cline）、SMS 認証コード、認証情報の貼り付けは完全に利用できます。本機へのコールバックが必要な Web ログイン（AutoClaw / CatPaw / Accio / CodeArts / Trae）と「本機ログイン状態の取り込み」は利用できないため、認証情報の貼り付けをお使いください。
+**Web パネルでの機能差**（「本機デスクトップクライアントが無い」ことに起因）: Web ログイン（WorkBuddy / Qoder / Cline）、SMS 認証コード、認証情報の貼り付けは完全に利用できます。本機へのコールバックが必要な Web ログイン（AutoClaw / CatPaw / Accio / CodeArts / Trae）と「本機ログイン状態の取り込み」は利用できないため、認証情報の貼り付けをお使いください。デスクトップ版で「Web 管理パネルも公開する」を有効にしてブラウザーから開いた場合も同じ差になります —— 同一の画面、同一の判定です。
+
+### コンテナ内アップデート（任意）
+
+パネルの「ソフトウェア更新」ページから、コンテナ内でそのまま「ダウンロードして更新」できます。公式 Release の `agent2api-server-linux-<arch>.tar.gz`（`.sha256` を検証）を取得 → 実行ファイルと `ui/` を差し替え → プロセスが正常終了し、`restart` ポリシーが同じコンテナを起動し直します。`AGENT2API_SELF_UPDATE` で制御します（Dockerfile では既定 `1`）。`0` にすると手動アップグレードのみになります。
+
+その `agent2api-server-linux-<arch>.tar.gz` は**この更新経路のペイロード専用**です: CI が Dockerfile のコンパイル経路を再利用してパッケージングし、中身の実行ファイルがイメージと同一ツールチェーンになるようにしています（`.github/workflows/build.yml` の `linux-server` job を参照）。インストールスクリプトも systemd ユニットも無く、別のデプロイ形態でもありません —— コンテナ外で走らせてもサービスは自動では戻りません（更新は「ファイルを差し替えて終了」し、Docker の `restart` ポリシーがプロセスを戻す前提です）。
+
+トレードオフに注意してください: コンテナ内更新の後は、イメージタグと**実際に動作しているバージョンがずれます**（`docker inspect` は古いタグを表示したままです）。`docker compose pull && up -d` でコンテナを再作成すると、イメージに焼き込まれたバージョンに戻ります。バージョンを固定したい場合はこの入口を有効にしないでください。
 
 ## 📸 画面プレビュー
 
@@ -201,6 +232,7 @@ services:
 
 - Rust >= 1.77 と Tauri 2 ツールチェーン（デスクトップアプリ本体のコンパイル用。Windows では WebView2 ランタイムも必要）
 - Node.js >= 18.17（`npm run tauri:*` とフロントエンドのビルドスクリプトの実行のみ。デスクトップアプリは実行時に Node へ依存しません）
+- 対象プラットフォーム: Windows / macOS / Linux のデスクトップ（各プラットフォームの bundle: Windows NSIS、macOS app+dmg、Linux deb+AppImage）と Docker のサーバー
 
 ### よく使うスクリプト
 
@@ -212,13 +244,15 @@ npm run tauri:build        # デスクトップのインストーラーをビル
 npm run build:icon         # アイコンのソース画像を生成（アイコン設計を変えた後に実行し、続けて tauri icon を実行）
 ```
 
-パッケージ成果物は `target/release/bundle/nsis/Agent2API_<バージョン>_x64-setup.exe`（現在およそ 3.0 MB。`src-tauri/.cargo/config.toml` が cargo の `target-dir` をプロジェクトルートの `target/` に指定しています）。
+パッケージ成果物は `target/release/bundle/nsis/Agent2API_<バージョン>_x64-setup.exe`（3.0 時点でおよそ 8.6 MB。`src-tauri/.cargo/config.toml` が cargo の `target-dir` をプロジェクトルートの `target/` に指定しています）。
+
+macOS の `.dmg` は **macOS 上でしかビルドできません**（`npm --prefix desktop-tauri run build -- --target universal-apple-darwin`）。Windows からのクロスコンパイルは不可のため、公式成果物は CI の `build` ワークフロー（`macos-latest` で 2 ターゲットを統合）が生成します。Linux デスクトップのパッケージは同じワークフローの `linux-desktop` job が生成し（deb + AppImage）、Docker イメージとコンテナ内更新に使うサーバーパッケージは `linux-server` job が生成します。後者は Dockerfile のコンパイル経路を再利用するため、パッケージ内の実行ファイルはイメージと同一ツールチェーンの成果物になります。
 
 ## 📜 使用に関する告知
 
 ### 学習・交流目的に限る
 
-本プロジェクトは、HTTP リバースプロキシ、SSE ストリーミングのパススルー、複数アップストリームのプロトコル適応、デスクトップパッケージング（Tauri）といった技術テーマを学ぶための実践プロジェクトであり、**個人の学習・研究目的のみ**を対象としています。公式製品ではなく、Tencent および WorkBuddy / CodeBuddy、Meituan および CatPaw、SenseTime および小浣熊、Zhipu および AutoClaw / autoglm、Alibaba および Qoder / Accio、Huawei Cloud および CodeArts / OfficeAce、ByteDance および Trae、iFlytek および Loomy、Baidu Wenku および KukuAI、長亭科技 および MonkeyCode、Command Code、Google および Antigravity のいずれとも一切の関係がなく、その承認やスポンサーシップも受けていません。
+本プロジェクトは、HTTP リバースプロキシ、SSE ストリーミングのパススルー、複数アップストリームのプロトコル適応、デスクトップパッケージング（Tauri）といった技術テーマを学ぶための実践プロジェクトであり、**個人の学習・研究目的のみ**を対象としています。公式製品ではなく、Tencent および WorkBuddy / CodeBuddy、Meituan および CatPaw、SenseTime および小浣熊、Zhipu および AutoClaw / autoglm、Alibaba および Qoder / Accio、Huawei Cloud および CodeArts / OfficeAce、ByteDance および Trae、iFlytek および Loomy、Baidu Wenku および KukuAI、長亭科技 および MonkeyCode、Command Code、Google および Antigravity、Alibaba および ModelScope（魔搭）のいずれとも一切の関係がなく、その承認やスポンサーシップも受けていません。
 
 ### リバースプロキシの挙動について
 

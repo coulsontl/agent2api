@@ -901,7 +901,13 @@ pub fn migrate(conn: &Connection) -> rusqlite::Result<()> {
         // 失败**不报错**：数据已经删掉了，回收空间是尽力而为的优化 —— 用户
         // 之后仍可在请求日志页的「清理」弹窗里手动压缩（那条路有后台线程与
         // 进度状态，见 `RequestStats::compact`）。
+        //
+        // VACUUM 前后各做一次 checkpoint（与 `RequestStats::compact` 同形，理由
+        // 见那边模块注释）：WAL 模式下 VACUUM 的整库重建会全部落进 `-wal`，
+        // 少了尾部那次截零，空间只是从主库搬到 WAL、总占用不降反升（issue #297）。
+        let _ = conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);");
         let _ = conn.execute_batch("VACUUM;");
+        let _ = conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);");
     }
     Ok(())
 }

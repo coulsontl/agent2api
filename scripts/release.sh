@@ -5,14 +5,17 @@
 #   bash scripts/release.sh vX.Y.Z <run-id>   # 或显式指定 run
 #
 # 做三件事：
-#   1. 下载 build 工作流的产物 artifact（windows-nsis / macos-universal，以及
-#      新版的 linux-server-amd64 / -arm64 两个容器内更新包）到 dist/；
-#   2. 用 tag 所指提交的提交信息（= 更新日志，见 agent.md 第 5 节）创建 / 更新
-#      GitHub Release 并挂全部附件；
+#   1. 下载 build 工作流的产物 artifact（windows-nsis / macos-universal /
+#      linux-desktop，以及 linux-server-amd64 / -arm64 两个容器内更新包）到 dist/；
+#   2. 用 tag 所指提交的提交信息（= 更新日志，见 .agents/skills/release-flow/SKILL.md
+#      第 5 节）创建 / 更新 GitHub Release 并挂全部附件；
 #   3. 打印验收提示。
 #
-# linux-server-* 两个 artifact 是后加的（容器内一键更新用）：老 tag 的 run 里
-# 没有它们，脚本只提醒、不中断（历史 tag 仍可重跑收尾）。
+# ── artifact 与新老 tag 的关系 ──────────────────────────────────
+# 三类 artifact 都是分阶段加上的，老 tag 的 run 里可能缺：
+#   · linux-server-*（容器内一键更新，v3.0.4 起）
+#   · linux-desktop（Linux 桌面端 deb / AppImage，本次新增）
+# 缺任一类时脚本**只提醒、不中断** —— 历史 tag 仍可重跑收尾。
 #
 # 幂等可重跑：附件 `--clobber` 覆盖上传。
 
@@ -87,9 +90,31 @@ EXE=$(ls dist/windows-nsis/*.exe)
 DMG=$(ls dist/macos-universal/*.dmg)
 echo "→ 已下载 $(basename "$EXE") / $(basename "$DMG")"
 
+ASSETS=("$EXE" "$DMG")
+
+# Linux 桌面端：deb 与 AppImage（build 工作流的 linux-desktop job 上传）。
+# 这一对是本功能上线后才有的 artifact —— 老 tag 的 run 里没有，提醒一句继续走
+# （与下面 linux-server 同一口径：历史 tag 仍可重跑收尾）。
+if [ -d dist/linux-desktop ]; then
+  LINUX_PKGS=()
+  for file in dist/linux-desktop/*; do
+    case "$file" in
+      *.deb|*.AppImage) LINUX_PKGS+=("$file") ;;
+    esac
+  done
+  if [ ${#LINUX_PKGS[@]} -gt 0 ]; then
+    ASSETS+=("${LINUX_PKGS[@]}")
+    echo "→ 已下载 Linux 桌面端包: $(basename "${LINUX_PKGS[@]}")"
+  else
+    echo "⚠️  linux-desktop artifact 里没有 .deb / .AppImage —— Linux 用户将看不到可下载的安装包"
+  fi
+else
+  echo "⚠️  这个 run 里没有 linux-desktop 产物（Linux 桌面端上线前的 tag？）——"
+  echo "    Release 将不含 Linux 桌面安装包，Linux 面板的「下载并安装」会被藏起"
+fi
+
 # 容器内更新包：两个架构的 tar.gz + 同名 .sha256（面板按名找校验文件，
 # 缺了会拒绝安装）。老 tag 的 run 没有这两个 artifact —— 提醒一句继续走。
-ASSETS=("$EXE" "$DMG")
 if [ -d dist/linux-server-amd64 ] && [ -d dist/linux-server-arm64 ]; then
   # 两个目录下各是 <包名>.tar.gz 与 <包名>.tar.gz.sha256，原样全带上
   for file in dist/linux-server-amd64/* dist/linux-server-arm64/*; do
@@ -124,13 +149,15 @@ echo "发版收尾完成。核对："
 echo "  [1] GitHub Release:  gh release view $TAG"
 if [ "$PRERELEASE" = true ]; then
   echo "      ↑ beta 版：Release 应显示 Prerelease —— 正式版用户收不到它，"
-  echo "        只有开了「加入 beta 版」的用户收得到（见 agent.md 第 4 节）"
+  echo "        只有开了「加入 beta 版」的用户收得到（见 .agents/skills/release-flow/SKILL.md 第 6 节）"
 else
   echo "  [2] Docker Hub:      https://hub.docker.com/r/aimodcc/agent2api/tags （$TAG 版本号 + latest）"
 fi
-echo "  [3] 安装包「关于」页版本号与 $TAG 一致"
-echo "  [4] 容器内更新：面板「设置 → 软件更新」出现「下载并更新」，且 Release 里"
+echo "  [3] 安装包「关于」页版本号与 $TAG 一致（Windows exe / macOS dmg / Linux deb+AppImage）"
+echo "  [4] Linux 桌面端：Release 里 .deb 与 .AppImage 都在；在 Linux 上装 deb（或"
+echo "      直接运行 AppImage）后，面板「设置 → 软件更新」能检查到下一版并给出安装入口"
+echo "  [5] 容器内更新：面板「设置 → 软件更新」出现「下载并更新」，且 Release 里"
 echo "      agent2api-server-linux-{amd64,arm64}.tar.gz 与各自的 .sha256 都在"
 if [ "$PRERELEASE" = true ]; then
-  echo "  [5] Docker 镜像：只出 $TAG 那个版本 tag（beta tag 不移动 :latest）"
+  echo "  [6] Docker 镜像：只出 $TAG 那个版本 tag（beta tag 不移动 :latest）"
 fi

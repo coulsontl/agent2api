@@ -95,7 +95,8 @@ use super::request::{read_upstream_error, send_chat_request, TransportRequest};
 use super::usage::LogPhase;
 use super::{
     account_display, account_label, cancellation, connections::ConnectionGuard, describe_proxy,
-    refusal, reset_hint, rotate, ForwardOutcome, InFlightGuard, RouteTarget, UpstreamService,
+    format_reset_text, refusal, reset_hint, rotate, ForwardOutcome, InFlightGuard, RouteTarget,
+    UpstreamService,
     MAX_ROUTE_ATTEMPTS,
 };
 
@@ -1390,8 +1391,28 @@ async fn attempt_queue(
                                     continue 'accounts;
                                 }
                                 None => {
+                                    // 所有候选都在冷却 / 禁用里 —— 把**最早的恢复时刻**
+                                    // 带进文案：客户端（Claude Code / Codex 等会读这条
+                                    // 文案的）才能做合法的退避等待，而不是立刻重试再撞
+                                    // 一次同样的墙。取不到（缓存里没有未来时刻）时退回
+                                    // 原句，逐字与改造前相同。
+                                    let earliest_reset = rotate::earliest_limit_reset_at(
+                                        service,
+                                        provider_ids,
+                                        &cooldown_keys,
+                                    );
+                                    let wait_hint = if earliest_reset > 0 {
+                                        let text = format_reset_text(earliest_reset as f64);
+                                        if text.is_empty() {
+                                            String::new()
+                                        } else {
+                                            format!("，最早 {text} 恢复")
+                                        }
+                                    } else {
+                                        String::new()
+                                    };
                                     let message = format!(
-                                        "{}（所有候选账号对模型 {model} 均已限额或禁用）",
+                                        "{}（所有候选账号对模型 {model} 均已限额或禁用{wait_hint}）",
                                         failure.error.message
                                     );
                                     rotate::report_limit_event(
@@ -1680,6 +1701,14 @@ async fn attempt_queue(
                         ctx.telemetry,
                     ),
                 ),
+                // 智谱清言：SSE 帧是「全量快照」，翻译机做差分（见那台的模块头）
+                UpstreamResponse::ChatglmSnapshot => {
+                    Box::pin(super::translate::ChatglmToChatStream::new(
+                        response,
+                        &wire_model,
+                        ctx.telemetry,
+                    ))
+                }
                 // 外层 `if` 已排除它，这一支只为 match 的穷尽性存在，**不可能
                 // 走到**。真走到说明分派被改坏了：报内部错误而不是 panic
                 // （release 是 `panic=abort`，一处 panic 带走整个网关）。

@@ -473,7 +473,6 @@ mod tests {
                 None,
             )
             .expect("首个账号应可添加");
-        let id = first.get("id").and_then(Value::as_str).unwrap_or("").to_string();
         // 同 id 同 token:覆盖更新放行
         store
             .add_lobster_account(

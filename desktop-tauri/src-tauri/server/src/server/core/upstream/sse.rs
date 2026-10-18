@@ -203,6 +203,53 @@ pub fn carries_terminal_signal(chunk: &Value) -> bool {
         .is_some()
 }
 
+/// 上游把「这一帧还没收尾」写成**空串**时，归一成 `null`。
+///
+/// 命中条件只有一条、也只动那一格：`choices[0].finish_reason` **键存在且值是空字符串**。
+/// 缺失、`null`、`"stop"`、数字、对象一概不碰（返回 `None` = 本帧继续走原行字节）。
+///
+/// ── 为什么要动这一格 ────────────────────────────────────────
+/// 生产实测（2026-10-18/19，官方 3.1.0）：WorkBuddy 与 Loomy 在
+/// `deepseek-v4.1-flash` / `glm-5.3` / `glm-5.3-flash` 这几个名字上，**每一帧**的
+/// `finish_reason` 都是空串（一手留档就是本模块测试里那组 `CAPTURED` 生产抓包字节，
+/// 来自 NAS `request_raw` 的**下发侧**），而本层对这些家是逐字节透传，空串原样出门。
+/// Qoder 侧的 SDK 把这个字段按**封闭枚举**映射，而且每个 chunk 无条件映射一次、没有任何
+/// 真值守卫，接受集只有 `stop` / `tool_calls` / `function_call` / `length` / 字符串 `"null"` /
+/// `null` / `undefined`（外加 `content_filter` / `refusal` / `sensitive`）。空串落进 default
+/// ⇒ 抛 `UnsupportedFinishReasonError`（`retryable=false`）⇒ **一条不重试、会话直接终止**。
+/// 近 4 天生产 20 次（WorkBuddy 17 / Loomy 3），全部是这一格。
+///
+/// 空串在这里的语义就是「没有收尾原因」，与 `null` 同一件事 —— 归一不是替上游编造结论，
+/// 而是把它已经表达的那个结论换成客户端认得的写法。
+///
+/// ── 为什么必须与 `[DONE]` 前补帧那条同时成立 ──────────────────
+/// 归一之后，一条只发空串、末尾也不给真收尾值的流会**一帧收尾值都没有**，而我们是按
+/// 「见过真值就不补」来决定补不补的（见 `handle_line` 里 `finish_seen` 那段）。两件事
+/// 合起来才闭合：空串不再被当成收尾值，流结束时由补帧那条给出 `stop`。只做归一而不做
+/// 补帧，会把现在能跑通的客户端（按 `""` 也能收尾的那一类，生产 7 天 624 条）推到
+/// 「结束时没有收尾值」那一格。
+///
+/// ── 字节代价（刻意说清）──
+/// 命中的那一帧必须重拼，因此不再「与上游逐字节相同」：成员顺序按 serde 排序、无空白。
+/// 这与 model 回写那条路径同一取向，且只影响**值为空串**的帧；其余帧一个字节都不动。
+fn normalize_absent_finish_reason(chunk: &Value) -> Option<Value> {
+    chunk
+        .get("choices")
+        .and_then(Value::as_array)
+        .and_then(|choices| choices.first())
+        .and_then(|choice| choice.get("finish_reason"))
+        .filter(|reason| matches!(reason, Value::String(text) if text.is_empty()))?;
+    let mut next = chunk.clone();
+    if let Some(choice) = next
+        .get_mut("choices")
+        .and_then(Value::as_array_mut)
+        .and_then(|choices| choices.first_mut())
+    {
+        choice["finish_reason"] = Value::Null;
+    }
+    Some(next)
+}
+
 /// 帧元数据（对应 Node 的 `meta = { id, model, created }`）
 #[derive(Default, Clone, Debug)]
 struct FrameMeta {
@@ -483,44 +530,48 @@ impl ReasoningCoalescer {
         out.push(self.rewritten_frame(line, &chunk));
     }
 
-    /// 透传一帧，必要时把 `model` 改写成客户端请求的名字。
+    /// 透传一帧：必要时归一空串 `finish_reason`、必要时把 `model` 改写成客户端请求的名字。
     ///
-    /// ── 为什么只改 model、不做别的 ─────────────────────────────
-    /// 回写是**客户端可见语义**的修正（客户端按自己给的名字识别响应），
-    /// 因此值得做；帧里的其它字段一律原样透传 —— 上游的异常/噪声字段
-    /// （空 tool_calls 数组之类）即便看起来像是 bug，也不该由网关擅自删除，
-    /// 那会让「代理看到的内容」与「上游发的」出现无从解释的差异。
-    /// 未配置回写（workbuddy）时返回**原行的字节**，透传逐字节不变。
+    /// ── 为什么只改这两格、不做别的 ─────────────────────────────
+    /// 两处都是**客户端可见语义**的修正：回写是因为客户端按自己给的名字识别响应；
+    /// 归一空串是因为上游那个写法会被按封闭枚举映射的客户端判成非法收尾值
+    /// （见 [`normalize_absent_finish_reason`]）。帧里的其它字段一律原样透传 ——
+    /// 上游的异常/噪声字段（空 tool_calls 数组之类）即便看起来像是 bug，也不该由网关
+    /// 擅自删除，那会让「代理看到的内容」与「上游发的」出现无从解释的差异。
+    ///
+    /// 两格都没命中时（绝大多数帧）返回**原行的字节**，透传逐字节不变。
     ///
     /// 序列化用 `serde_json::to_string`（紧凑、无空格），与源实现
     /// `JSON.stringify(parsed)` 同形；失败时退回原行（宁可少一次改写，
     /// 也不要下发一条拼坏的帧）。
     fn rewritten_frame(&self, line: &str, chunk: &Value) -> Frame {
-        let Some(rewrite) = &self.rewrite else {
-            return plain_frame(line);
-        };
-        let Some(object) = chunk.as_object() else {
-            return plain_frame(line);
-        };
-        // 上游没带 model 时**不补**：源实现同样只在 `'model' in parsed` 时才改写
-        // （补一个客户端自己会填的字段没有意义，反而给「上游到底回了什么」加噪音）
-        if !object.contains_key("model") {
-            return plain_frame(line);
+        // ① 空串收尾值的归一（只在真命中时才拷一份值；没命中就一个字节都不动）
+        let mut next: Option<Value> = normalize_absent_finish_reason(chunk);
+        // ② model 名回写：叠在①的产物上，没①时以上游原值为底
+        if let Some(rewrite) = &self.rewrite {
+            let applies = chunk
+                .as_object()
+                .filter(|object| object.contains_key("model"))
+                .map(|object| {
+                    object.get("model").and_then(Value::as_str).unwrap_or("") != rewrite.requested
+                })
+                // 上游没带 model 时**不补**：源实现同样只在 `'model' in parsed` 时才改写
+                // （补一个客户端自己会填的字段没有意义，反而给「上游到底回了什么」加噪音）
+                .unwrap_or(false);
+            if applies {
+                let mut value = next.unwrap_or_else(|| chunk.clone());
+                if let Some(map) = value.as_object_mut() {
+                    map.insert("model".to_string(), Value::String(rewrite.requested.clone()));
+                }
+                next = Some(value);
+            }
         }
-        let current = object.get("model").and_then(Value::as_str).unwrap_or("");
-        if current == rewrite.requested {
-            return plain_frame(line);
-        }
-        let mut next = chunk.clone();
-        if let Some(map) = next.as_object_mut() {
-            map.insert(
-                "model".to_string(),
-                Value::String(rewrite.requested.clone()),
-            );
-        }
-        match serde_json::to_string(&next) {
-            Ok(text) => Bytes::from(format!("data: {text}\n\n")),
-            Err(_) => plain_frame(line),
+        match next {
+            Some(value) => match serde_json::to_string(&value) {
+                Ok(text) => Bytes::from(format!("data: {text}\n\n")),
+                Err(_) => plain_frame(line),
+            },
+            None => plain_frame(line),
         }
     }
 
@@ -728,41 +779,172 @@ mod tests {
         r#"data: {"id":"cmb-22097200b9bf11f1a8cfb69a5c373198","model":"deepseek-v4.1-flash","object":"chat.completion.chunk","created":1790436599,"choices":[{"index":0,"delta":{"content":":\n","reasoning_content":"","function_call":null,"refusal":"","tool_calls":[],"extra_fields":null},"logprobs":null,"finish_reason":""}],"usage":null}"#,
     ];
 
+    /// 把一段下发字节按帧切成解析好的 JSON（多条用例都要数帧、读某一格）
+    fn frames(text: &str) -> Vec<Value> {
+        text.split('\n')
+            .filter_map(|line| line.strip_prefix("data: "))
+            .filter_map(|data| serde_json::from_str::<Value>(data).ok())
+            .collect()
+    }
+
+    /// 客户端按帧拼出来的 `delta.content`
+    fn content_of(text: &str) -> String {
+        frames(text)
+            .iter()
+            .filter_map(|chunk| {
+                chunk
+                    .get("choices")?
+                    .get(0)?
+                    .get("delta")?
+                    .get("content")?
+                    .as_str()
+                    .map(str::to_string)
+            })
+            .collect()
+    }
+
+    /// 上游那种「空串收尾值」的字面量。
+    ///
+    /// **必须用转义写法**：`r#""finish_reason":""#` 会在末尾那个引号处被 `"#` 提前终止，
+    /// 实际内容少掉最后一个引号（变成 `"finish_reason":"`）—— 那条 needle 连我们自己
+    /// 补出来的 `"finish_reason":"stop"` 都能命中，会把「线上不许有空串」做成一条
+    /// **恒假判据**（第一次就红在补帧那一格，看着像归一没生效）。
+    const EMPTY_REASON: &str = "\"finish_reason\":\"\"";
+
+    /// 一帧里的 `choices[0].finish_reason` 原值：`None` = 键不存在（null 会如实是 `Value::Null`）
+    fn finish_reason_of(chunk: &Value) -> Option<Value> {
+        chunk.get("choices")?.get(0)?.get("finish_reason").cloned()
+    }
+
     #[test]
     fn a_replayed_production_stream_keeps_only_the_text_bearing_frames() {
         let stream: String = CAPTURED.iter().map(|line| format!("{line}\n\n")).collect();
-        let text_bearing: Vec<String> = vec![0, 2, 4, 6]
-            .into_iter()
-            .map(|index| format!("{}\n\n", CAPTURED[index]))
-            .collect();
+        // 标本自身必须带空串，否则下面那几条断言全是空跑
+        assert!(
+            CAPTURED.iter().all(|line| line.contains(EMPTY_REASON)),
+            "这组生产字节里的收尾值就该是空串"
+        );
 
-        // 开启：只留带正文的四帧，且每帧逐字节不变（丢帧是整帧丢，不重写）
+        // 开启：只留带正文的四帧（丢帧仍是整帧丢，不重写载荷）
         let mut on = coalescer(true);
         let dropped = feed(&mut on, &stream);
-        assert_eq!(dropped, text_bearing.concat(), "开启时应当只留下带正文的帧");
+        assert_eq!(frames(&dropped).len(), 4, "开启时应当只留下带正文的帧");
 
-        // 关闭：七帧原样出去 —— 与接入本功能前的字节完全一致
+        // 关闭：七帧都出门（数量与顺序不因归一而变）
         let mut off = coalescer(false);
-        assert_eq!(feed(&mut off, &stream), stream, "关掉时要逐字节透传整段流");
+        assert_eq!(frames(&feed(&mut off, &stream)).len(), 7, "关掉丢弃时七帧都要出门");
 
         // 客户端拼出来的正文（两种开关对照）
-        let content_of = |text: &str| -> String {
-            text.split("\n")
-                .filter_map(|line| line.strip_prefix("data: "))
-                .filter_map(|data| serde_json::from_str::<Value>(data).ok())
-                .filter_map(|chunk| {
-                    chunk
-                        .get("choices")?
-                        .get(0)?
-                        .get("delta")?
-                        .get("content")?
-                        .as_str()
-                        .map(str::to_string)
-                })
-                .collect()
-        };
         assert_eq!(content_of(&dropped), "A real finding:\n");
         assert_eq!(content_of(&stream), "A\n real\n finding\n:\n");
+
+        // 唯一被改写的格：上游那个空串收尾值。**归一之后这些帧不再与原文逐字节相同**，
+        // 变的只有 finish_reason —— 正文、usage、那串噪声字段（refusal / tool_calls /
+        // extra_fields / function_call / logprobs）都得原样还在。
+        for chunk in frames(&dropped) {
+            assert_eq!(
+                finish_reason_of(&chunk),
+                Some(Value::Null),
+                "出门的每帧收尾值都必须是 null: {chunk}"
+            );
+            let choice = chunk.get("choices").and_then(Value::as_array).unwrap()[0].clone();
+            for key in ["logprobs", "index"] {
+                assert!(choice.get(key).is_some(), "归一不许顺手删掉别的格: {key}");
+            }
+            let delta = choice.get("delta").unwrap();
+            for key in ["reasoning_content", "function_call", "refusal", "tool_calls", "extra_fields"] {
+                assert!(delta.get(key).is_some(), "噪声字段必须原样留着: {key}");
+            }
+            assert_eq!(chunk.get("usage"), Some(&Value::Null), "usage 那格不许被动");
+        }
+    }
+
+    /// 空串 → `null`：这一格改了，别的一概不碰。
+    #[test]
+    fn an_empty_finish_reason_never_reaches_the_client() {
+        let mut on = coalescer(false);
+        let out = feed(&mut on, &raw(json!({
+            "model": "deepseek-v4.1-flash",
+            "choices": [{"index": 0, "delta": {"content": "hi"}, "finish_reason": ""}],
+            "usage": {"prompt_tokens": 3},
+        })));
+        assert!(!out.contains(EMPTY_REASON), "线上不许再出现空串收尾值: {out}");
+        let chunk = &frames(&out)[0];
+        assert_eq!(finish_reason_of(chunk), Some(Value::Null));
+        assert_eq!(chunk.get("choices").unwrap()[0]["delta"]["content"], "hi");
+        assert_eq!(chunk["usage"]["prompt_tokens"], 3);
+
+        // 正对照：上游原行确实带那个空串 —— 不改就是把它发出去
+        let line = raw(json!({"choices": [{"index": 0, "delta": {}, "finish_reason": ""}]}));
+        assert!(line.contains(EMPTY_REASON));
+    }
+
+    /// **归一只管「没有收尾」这一件事**：客户端本来就认得的写法、以及认不得但
+    /// 不是空串的值，都不许动 —— 后者若被我们改成 null，等于替上游编了一个收尾原因。
+    #[test]
+    fn every_other_finish_reason_shape_is_left_byte_identical() {
+        for reason in [
+            json!("stop"),
+            json!("length"),
+            json!("tool_calls"),
+            json!("content_filter"),
+            json!("queued"), // 非空但不合法：原样透传，不替上游猜
+            json!(null),
+            json!(0),        // 数字（不是空串）：不碰
+        ] {
+            let mut on = coalescer(false);
+            let text = raw(json!({"choices": [{"index": 0, "delta": {"content": "x"}, "finish_reason": reason}]}));
+            assert_eq!(feed(&mut on, &text), text, "该格为 {reason} 时一个字节都不许变");
+        }
+        // 键根本不存在：也不补
+        let mut on = coalescer(false);
+        let text = raw(json!({"choices": [{"index": 0, "delta": {"content": "x"}}]}));
+        assert_eq!(feed(&mut on, &text), text, "没有 finish_reason 键时不许凭空补一个");
+    }
+
+    /// 归一与「`[DONE]` 前补 stop」必须**同时**成立：归一让每帧都不再冒充收尾值，
+    /// 补帧保证流结束时一定有一个客户端认得的收尾。只做前者，会把现在能跑通的客户端
+    /// 推到「结束时没有收尾值」那一格。
+    #[test]
+    fn the_normalization_and_the_synthesized_stop_frame_close_one_turn_together() {
+        let stream: String = CAPTURED.iter().map(|line| format!("{line}\n\n")).collect();
+        let mut on = coalescer(true);
+        let mut out = feed(&mut on, &stream);
+        out.push_str(&feed(&mut on, "data: [DONE]\n\n"));
+
+        assert!(!out.contains(EMPTY_REASON), "线上不许再出现空串收尾值: {out}");
+        let parsed = frames(&out);
+        let stop_at = parsed
+            .iter()
+            .position(|chunk| finish_reason_of(chunk) == Some(json!("stop")));
+        let done_at = out.rfind("data: [DONE]");
+        assert!(stop_at.is_some(), "归一之后必须由补帧给出一帧 stop: {out}");
+        assert!(done_at.is_some());
+        // 顺序：正文帧 → 补的 stop 帧 → [DONE]
+        assert_eq!(parsed.len(), 5, "四帧正文 + 一帧补的收尾");
+        assert_eq!(finish_reason_of(&parsed[4]), Some(json!("stop")));
+        assert_eq!(content_of(&out), "A real finding:\n", "补帧不许改动正文");
+    }
+
+    /// 归一与 model 回写**叠在同一帧**上：两格都得生效，谁也不许把谁吃掉
+    /// （回写那条路径原先从不碰别的字段，两件事共用一次重拼正好各改各的格）。
+    #[test]
+    fn normalization_stacks_with_the_model_rewrite() {
+        let mut on = ReasoningCoalescer::new().with_policy(FramePolicy {
+            rewrite: Some(ModelRewrite { requested: "glm-5.3-flash".to_string() }),
+            strip_newline_chunks: false,
+        });
+        let out = feed(
+            &mut on,
+            &raw(json!({
+                "model": "deepseek-v4.1-flash",
+                "choices": [{"index": 0, "delta": {"content": "hi"}, "finish_reason": ""}],
+            })),
+        );
+        let chunk = &frames(&out)[0];
+        assert_eq!(chunk["model"], "glm-5.3-flash", "回写不能被归一顶掉: {chunk}");
+        assert_eq!(finish_reason_of(chunk), Some(Value::Null), "归一不能被回写顶掉: {chunk}");
+        assert_eq!(chunk["choices"][0]["delta"]["content"], "hi");
     }
 
     /// 上游以 `[DONE]` 收尾、全程没给非 null `finish_reason` ⇒ 必须在 `[DONE]`
@@ -873,13 +1055,19 @@ mod tests {
         assert_eq!(policy.rewrite.map(|value| value.requested).as_deref(), Some("m"));
     }
 
-    /// 端到端一条：**能力位开着、开关关着**时，那条生产脏流要逐字节原样出去。
+    /// 端到端一条：**能力位开着、开关关着**时，那条生产脏流的七帧一帧都不许被丢掉。
     ///
     /// 这条是"默认零影响"的证据，不是上面那条纯函数的重复：它走的是真实状态机
     /// （`ReasoningCoalescer::push`），万一将来丢弃动作被挪到别处（比如挪到
     /// reasoning 累积之前），纯函数的断言还会绿，而这条会红。
+    ///
+    /// ⚠️ 改到这条时先核对过：它原来断言的是「七帧一字不动地出去」，也就是把
+    /// **丢弃**与**空串收尾值归一**两件事一起绑在这个开关上。归一是无条件做的
+    /// （它不受部署开关管 —— 客户端拿到非法收尾值就终止会话，没有"先别修"的选项），
+    /// 所以这里能钉的不变量是「开关只管丢不丢」：帧数一条不少，正文逐字不变，
+    /// 唯一被改写的格是 `finish_reason`。
     #[test]
-    fn a_capable_provider_with_the_switch_off_still_streams_byte_identical_frames() {
+    fn a_capable_provider_with_the_switch_off_drops_nothing() {
         let stream: String = CAPTURED.iter().map(|line| format!("{line}\n\n")).collect();
         let declared_but_switched_off =
             FramePolicy::assembled(None, true, false).strip_newline_chunks;
@@ -892,7 +1080,14 @@ mod tests {
             .iter()
             .map(|frame| String::from_utf8_lossy(frame).to_string())
             .collect();
-        assert_eq!(out, stream, "开关关着时七帧要一字不动地出去");
+        assert_eq!(frames(&out).len(), CAPTURED.len(), "开关关着时一帧都不许丢");
+        assert_eq!(content_of(&out), content_of(&stream), "开关关着时正文要逐字保留");
+        assert!(!out.contains(EMPTY_REASON), "空串收尾值与开关无关，一律归一: {out}");
+        assert_eq!(
+            out.matches("\"id\":\"cmb-22097200b9bf11f1a8cfb69a5c373198\"").count(),
+            CAPTURED.len(),
+            "上游的 id 一格都不许被动"
+        );
     }
 
     /// OfficeAce 工具调用流的**收尾帧原样字节**（NAS dev `debug_traffic`，

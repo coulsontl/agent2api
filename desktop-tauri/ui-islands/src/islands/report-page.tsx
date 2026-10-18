@@ -49,7 +49,7 @@ import { t } from '../i18n'
  * 间隔由「定时任务」页配置（`scheduledTasks.reportAutoRefresh`），本页启动时自读一次
  * （syncAutoRefresh），之后接受那边推送（applyAutoRefresh）。定时器长在组件里（配置一变
  * 就重排、卸载即清表），只在**本页可见时**才请求（`document.hidden` 与 `wbApp.currentPage`
- * 都判），离开页面完全静默。兜底 1 秒 = 后端的默认间隔。
+ * 都判），离开页面完全静默。兜底 30 秒 = 后端的默认间隔。
  *
  * ── 坑：带 Tailwind display 工具类的元素上 hidden 无效 ─────────
  * 组件库的工具类是分层 + !important 的，tokens.css 的 `[hidden] { display:none !important }`
@@ -102,10 +102,15 @@ function shared(): SharedWindow {
 /* ─── 常量 ─────────────────────────────────── */
 
 /**
- * 自动刷新间隔（毫秒）的兜底值，1 秒 = 后端的默认间隔
- * （`DEFAULT_REPORT_AUTO_REFRESH_SECONDS`）。
+ * 自动刷新间隔（毫秒）的兜底值，30 秒 = 后端的默认间隔
+ * （`DEFAULT_REPORT_AUTO_REFRESH_SECONDS`，2026-10-17 由 1 秒改为 30 秒：
+ * 报表每次查询要做多维度、较长区间的聚合，秒级轮询会把数据库读锁与 CPU
+ * 一起顶上去）。
+ *
+ * 只有「读配置失败」时才走到这里 —— 正常路径读的是用户配置（`syncAutoRefresh`），
+ * 读到了就用配置值，与本常量无关。
  */
-const DEFAULT_AUTO_REFRESH_MS = 1_000
+const DEFAULT_AUTO_REFRESH_MS = 30_000
 
 /** 选项提到模块级：SegmentedControl 每拿到新数组都要重新量滑块位置，常量能省掉这轮测量 */
 const RANGE_OPTIONS: readonly SegmentedControlOption<string>[] = RANGES.map(value => ({
@@ -524,7 +529,7 @@ async function syncAutoRefresh(): Promise<void> {
     autoSynced = Array.isArray(list?.tasks)
   } catch (error) {
     // 读不到就用兜底值继续跑（见 applyAutoRefresh），下次切进本页再试
-    console.warn('读取报表自动刷新间隔失败，按默认 1 秒:', error instanceof Error ? error.message : error)
+    console.warn('读取报表自动刷新间隔失败，按默认 30 秒:', error instanceof Error ? error.message : error)
     applyAutoRefresh(null)
   }
 }

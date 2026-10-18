@@ -178,7 +178,7 @@ pub async fn stats_summary(State(state): State<ServerState>, Query(params): Quer
     // ── 为什么在 `spawn_blocking` 里算 ──────────────────────────
     // `usage_summary` 整条路是**同步**的（SQLite 读 + 纯函数），而且持着统计库
     // 那把全局连接锁。直接在 async handler 里调用会占住一个 tokio worker 线程
-    // 直到它跑完 —— 报表是前端轮询的接口（默认每秒一次、可在定时任务里调），
+    // 直到它跑完 —— 报表是前端轮询的接口（默认 30 秒一次、可在定时任务里调），
     // 这种「同步读库」不该出现在 async 运行时线程上。与 `backup_api` /
     // `upgrade_api` 的慢操作同一处理。
     //

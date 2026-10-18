@@ -320,7 +320,7 @@ const setModelEnabled: AssistantTool = {
   id: 'set_model_enabled',
   label: t('启用 / 禁用模型'),
   kind: 'write',
-  desc: '开启或关闭某几个模型在网关上的可用性（粒度是「提供商 × 模型」）。禁用后下游请求不再路由到它。一次可以改多个。',
+  desc: '开启或关闭某几个模型在网关上的可用性（粒度是「提供商 × 模型」）。禁用后下游请求不再路由到它。一次可以改多个。**只支持内置提供商** —— 自定义家的模型启停请在模型管理页操作（自定义家的清单是用户登记的运行期数据，启停是每条记录自己的字段，不走 modelRules）。',
   params: {
     type: 'object',
     properties: {
@@ -379,7 +379,7 @@ const setModelMapping: AssistantTool = {
   id: 'set_model_mapping',
   label: t('设置模型映射 ID'),
   kind: 'write',
-  desc: '给模型新增或删除映射名（对外名）。同一对外名可以在多个提供商各挂一条：下游用同一个名字请求，网关按账号优先级主备切换；也可以给不同家的同名模型各加前缀（如 ca/claude-sonnet-4.5）来精确指定某一家。一次可以改多条。删掉的映射名只是不再对外可用，不删任何模型。',
+  desc: '给模型新增或删除映射名（对外名）。同一对外名可以在多个提供商各挂一条：下游用同一个名字请求，网关按账号优先级主备切换；也可以给不同家的同名模型各加前缀（如 ca/claude-sonnet-4.5）来精确指定某一家。一次可以改多条。删掉的映射名只是不再对外可用，不删任何模型。**只支持内置提供商** —— 自定义家的映射请在模型管理页操作（那家的 models / mappings 存在自己的提供商记录里，不走 modelRules）。',
   params: {
     type: 'object',
     properties: {

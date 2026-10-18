@@ -450,7 +450,16 @@ async fn drive_stream(
     while let Some(item) = source.next().await {
         match item {
             Err(error) => {
-                telemetry.note_error(&format!("Trae 上游流中断: {error}"));
+                // 传输层中断（上游把连接撑断）走这条，**不是** `missing_terminal`
+                // 那一格 —— 后者只管「上游正常 EOF 但没发 `event: done`」。
+                // 两种形状在 issue #286 里是同一个后果（客户端只收到前缀），
+                // 排查时常按「完成事件缺失」去搜，所以这里把那一半也点出来：
+                // 产出过内容却没等到 done 时，这确实是「完成事件缺失」。
+                let missing_done = !solo.saw_done() && solo.saw_output();
+                telemetry.note_error(&format!(
+                    "Trae 上游流中断: {error}{}",
+                    if missing_done { "（此前已产出内容但未收到 event: done —— 完成事件缺失）" } else { "" }
+                ));
                 let _ = sender.send(Err(error)).await;
                 return;
             }

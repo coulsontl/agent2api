@@ -265,30 +265,53 @@ pub fn split_by_image_capability(
 
 /// 这家承接 `requested` 时实际用的那条清单条目（别名先解析成上游真名再取）。
 ///
-/// 解析走 [`wire_target_for_provider`] —— 与发送侧同一个函数，因此不会出现
-/// 「闸门按 A 条目判、发出去按 B 条目走」的分叉。取不到条目返回 `None`
-/// （未知家 / 未知模型 / 自定义家没这条模型），调用方按「不知道」放行。
+/// 解析**按家分派**、与发送侧同一个函数，因此不会出现「闸门按 A 条目判、发出去
+/// 按 B 条目走」的分叉：
+///   - 内置家 → [`wire_target_for_provider`]（`modelRule` 映射 + 前缀规则）；
+///   - 自定义家 → [`custom_providers::wire_model_for`]（该家的 `mappings` 别名表）。
+///
+/// ⚠️ 2026-10-17 审查抓到的真缺口：这里原先把**两家都**喂给
+/// `wire_target_for_provider`，而它对非内置 id 直接原样返回（见那个函数的
+/// 「自定义提供商在自己的转发模块解析」）—— 于是请求名是别名 `my-glm` 时，
+/// `models_of` 里找不到 `my-glm`（那里登记的是 target `glm-5.3`），闸门读到
+/// `None` 按「不知道」放行；随后自定义转发把名字改写成 `glm-5.3` 发出去，
+/// 图片照发。别名请求因此绕过了整个识图闸门与剥图层。
+///
+/// 取不到条目返回 `None`（未知家 / 未知模型 / 自定义家没这条模型），调用方按
+/// 「不知道」放行。
 pub fn manifest_entry_for(provider_id: &str, requested: &str) -> Option<Value> {
-    let wire = wire_target_for_provider(requested, provider_id, None).model;
     if let Some(kind) = kind_from_id(provider_id) {
+        let wire = wire_target_for_provider(requested, provider_id, None).model;
         return manifest_for(kind)
             .iter()
             .find(|entry| model_id(entry).eq_ignore_ascii_case(&wire))
             .cloned()
             .map(|entry| entry_with_capabilities_flattened(&entry));
     }
-    // 自定义家：`models_of` 给的是存储形态（能力位嵌在 `capabilities` 里），
+    // 自定义家：别名要先解析成**上游真名**，再用真名去 `models_of` 里取条目
+    // ——与发送侧 `custom::forward::rewrite_body` 同一解析（同一个函数）。
+    let (wire, _) = custom_providers::wire_model_for(provider_id, requested);
+    custom_entry_for_alias(&wire, &custom_providers::models_of(provider_id))
+}
+
+/// 自定义家的清单条目查找（纯函数：只读入参，不碰全局配置）。
+///
+/// 抽出来是为了可测：`models_of` / `wire_model_for` 都读全局配置，而本仓的
+/// 目录测试会并发改写各家清单缓存；把「按真名找条目 + 展平 + 补实测事实」
+/// 这段纯逻辑单独测，用例才与并发无关。
+fn custom_entry_for_alias(wire: &str, models: &[Value]) -> Option<Value> {
+    // `models_of` 给的是存储形态（能力位嵌在 `capabilities` 里），
     // 必须展平后再判，否则用户在管理页勾掉的能力对闸门不可见。
     //
     // ⚠️ 自定义家**不过 `model_meta::apply`**（那条路径只喂 `bindings::public_models`
     // 这个出口视图），所以「模型本体」的实测事实必须在这里单独补一次 ——
     // 2026-10-17 端到端验证抓到的真缺口：给自定义家登记 `glm-5.3` 后，闸门
     // 读到的仍是「什么都不声明」，带图请求照样发出去。
-    custom_providers::models_of(provider_id)
-        .into_iter()
-        .find(|entry| model_id(entry).eq_ignore_ascii_case(&wire))
+    models
+        .iter()
+        .find(|entry| model_id(entry).eq_ignore_ascii_case(wire))
         .map(|entry| {
-            let mut entry = entry_with_capabilities_flattened(&entry);
+            let mut entry = entry_with_capabilities_flattened(entry);
             crate::server::core::model_meta::apply_intrinsic_only(&mut entry);
             entry
         })
@@ -359,8 +382,9 @@ mod vision_gate {
     use serde_json::json;
 
     use super::{
-        decide_image_gate, entry_refuses_images, entry_with_capabilities_flattened,
-        manifest_entry_for, split_by_image_capability, ImageCapabilitySplit, ImageGate,
+        custom_entry_for_alias, decide_image_gate, entry_refuses_images,
+        entry_with_capabilities_flattened, manifest_entry_for, split_by_image_capability,
+        ImageCapabilitySplit, ImageGate,
     };
 
     fn providers(ids: &[&str]) -> Vec<String> {
@@ -569,6 +593,44 @@ mod vision_gate {
         });
         assert!(!entry_refuses_images(&entry_with_capabilities_flattened(&junk)),
                 "\"yes\" 是非空串 = 真值，与 /v1/models 出口同判据");
+    }
+
+    /// 自定义家**别名**请求必须按 target 的条目判能力。
+    ///
+    /// 2026-10-17 审查抓到的 High：闸门原先对自定义家也调
+    /// `wire_target_for_provider`（它对非内置 id 原样返回），于是别名 `my-glm`
+    /// 在 `models_of` 里找不到 —— 返回 None = 「不知道」= 放行；随后转发层把名字
+    /// 改写成 `glm-5.3` 发出去，图片照发。闸门与剥图层因此双双失效。
+    ///
+    /// 这里直接钉「解析后的真名 + 登记表」这段纯逻辑：发送侧用同一个
+    /// `wire_model_for`，两处因此不会分叉。
+    #[test]
+    fn a_custom_alias_is_judged_by_its_target_entry() {
+        let models = vec![json!({
+            "id": "glm-5.3",
+            "enabled": true,
+            "capabilities": {}
+        })];
+        // 别名解析后的真名 = 登记表里的 target ⇒ 取得到条目，闸门按它判
+        let entry = custom_entry_for_alias("glm-5.3", &models).expect("按真名要取得到");
+        assert!(entry_refuses_images(&entry), "glm-5.3 的实测事实要生效");
+
+        // 反证：拿**别名**去查是取不到的 —— 这正是修复前的样子
+        assert!(
+            custom_entry_for_alias("my-glm", &models).is_none(),
+            "别名本身不在登记表里；调用方必须先解析成真名"
+        );
+
+        // 能力位覆盖同样按真名生效（展平那一步不能漏）
+        let overridden = vec![json!({
+            "id": "glm-5.3",
+            "capabilities": {"supportsImages": true}
+        })];
+        let entry = custom_entry_for_alias("glm-5.3", &overridden).expect("取得到");
+        assert!(
+            !entry_refuses_images(&entry),
+            "用户把它改成支持后，闸门要按用户声明放行"
+        );
     }
 }
 

@@ -162,13 +162,7 @@ pub fn apply(item: &mut Value) {
             }
         }
     } else {
-        // 没收录也要把上游声明记下来：管理页据此说明「这个值来自上游」，
-        // 而不是显示成「没数据」。
-        for key in BOOL_BRIDGE.iter().map(|(key, _)| *key).chain(TOKEN_BRIDGE.iter().map(|(key, _)| *key)) {
-            if object.get(key).is_some_and(|value| !value.is_null()) {
-                sources.insert(key.to_string(), json!("upstream"));
-            }
-        }
+        mark_declared_keys(object, &mut sources);
     }
     if !sources.is_empty() {
         if let Some(object) = item.as_object_mut() {
@@ -176,6 +170,26 @@ pub fn apply(item: &mut Value) {
         }
     }
     normalize_levels(item, record.as_ref());
+}
+
+/// models.dev **没收录**这个模型时，把上游自己声明过的键记成 `upstream`。
+///
+/// ⚠️ **已有来源的键一律不动**：`apply_intrinsic_facts` 在这之前已经把实测键
+/// 标成 `observed` 了。无条件覆盖会让管理页把「网关实测」说成「上游声明的」——
+/// 两种可信度差着量级（`glm-5.3` 的 false 就来自我们的面板实测）。
+fn mark_declared_keys(object: &Map<String, Value>, sources: &mut Map<String, Value>) {
+    let keys = BOOL_BRIDGE
+        .iter()
+        .map(|(key, _)| *key)
+        .chain(TOKEN_BRIDGE.iter().map(|(key, _)| *key));
+    for key in keys {
+        if sources.contains_key(key) {
+            continue;
+        }
+        if object.get(key).is_some_and(|value| !value.is_null()) {
+            sources.insert(key.to_string(), json!("upstream"));
+        }
+    }
 }
 
 /// 归一逐模型档位（原键只读，见模块头）。
@@ -300,5 +314,49 @@ mod tests {
         apply(&mut item);
         assert_eq!(json!(true), item["supportsImages"], "上游说能就是能，实测表不覆盖");
         assert_eq!(json!("upstream"), item["capSources"]["supportsImages"]);
+    }
+
+    /// `observed` 在**两条**录入分支里都不能被改写成 `upstream`。
+    ///
+    /// 2026-10-17 审查抓的：`apply` 的 else 分支原本无条件把「有值的键」标成
+    /// `upstream`，而 `apply_intrinsic_facts` 在这之前刚把实测键标成
+    /// `observed`。管理页于是把「网关实测」说成「上游声明的」，两种可信度被
+    /// 抹平。
+    ///
+    /// ⚠️ 实测 `glm-5.3` **在** models.dev 快照里（`glm53` → `zhipuai/glm-5.3`，
+    /// images: false），所以它走的是 `Some(record)` 分支；else 分支只能直接
+    /// 构造：一个实测表里有、但快照里查不到的 id 会同时触发两件事 ——
+    /// `apply_intrinsic_facts` 写入 `observed`，随后 else 分支尝试标 `upstream`。
+    /// 这里用 `apply_intrinsic_facts` 单独跑一遍，正是因为它不依赖收录。
+    #[test]
+    fn the_observed_source_survives_in_both_modelsdev_branches() {
+        // ① 快照收录时的实际路径（glm-5.3 的真实处境）
+        let mut covered = json!({"id": "glm-5.3"});
+        apply(&mut covered);
+        assert_eq!(json!(false), covered["supportsImages"]);
+        assert_eq!(
+            json!("observed"),
+            covered["capSources"]["supportsImages"],
+            "快照收录了也改不掉来源：值不是它给的（它给的也是 false，但出处不同）"
+        );
+
+        // ② 不收录的那条分支（`mark_declared_keys`）**不许**改写已有来源。
+        //    直接构造「实测表已标 observed」的局面，再跑那条分支。
+        let item = json!({"id": "glm-5.3", "supportsImages": false});
+        let object = item.as_object().expect("对象");
+        let mut sources = serde_json::Map::new();
+        sources.insert("supportsImages".to_string(), json!("observed"));
+        super::mark_declared_keys(object, &mut sources);
+        assert_eq!(
+            json!("observed"),
+            sources["supportsImages"],
+            "没收录不等于上游声明过 —— 已有来源的键不许被 mark_declared_keys 覆盖"
+        );
+        // 对照：没有来源的键照常标 upstream（这个函数的本职）
+        let declared = json!({"id": "m", "supportsImages": true, "maxInputTokens": 1000});
+        let mut only = serde_json::Map::new();
+        super::mark_declared_keys(declared.as_object().expect("对象"), &mut only);
+        assert_eq!(json!("upstream"), only["supportsImages"]);
+        assert_eq!(json!("upstream"), only["maxInputTokens"]);
     }
 }

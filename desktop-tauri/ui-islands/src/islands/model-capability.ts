@@ -191,12 +191,18 @@ export function capabilityTip(
  *
  *   `upstream` 上游清单自己声明的（这条转发通道的真实情况）
  *   `modelsdev` 上游没声明、由 models.dev 补的（社区库的数据）
+ *   `observed` 我们**实测**过的模型本体能力（与走哪个渠道无关，
+ *              见后端 `model_meta::fill::model_intrinsic_flag`）
  *   `user` 用户在「模型能力」里手工改的（永远最高）
  *
- * 空串 = 没有来源（未声明）。三档的可信度差着量级，所以界面上必须分开说 ——
- * 三个值长得一模一样、来源却不同，用户没法判断该不该信。
+ * 空串 = 没有来源（未声明）。四档的可信度差着量级，所以界面上必须分开说 ——
+ * 值长得一模一样、来源却不同，用户没法判断该不该信。
+ *
+ * ⚠️ `observed` 是 2026-10-17 补的**第四档**：后端先加了它、前端这张表没跟上，
+ * 结果是「模型实测不支持」在管理页显示成「上游未声明」—— 用户看到「不知道」，
+ * 而后端其实明确按「不支持」在拦（闸门认 `observed`）。两端的取值集合必须一致。
  */
-export type CapabilitySource = 'upstream' | 'modelsdev' | 'user'
+export type CapabilitySource = 'upstream' | 'modelsdev' | 'observed' | 'user'
 
 /** 读某个键的来源（后端没标 / 值不认识 → 空串） */
 export function capSourceOf(
@@ -204,12 +210,15 @@ export function capSourceOf(
   key: CapabilityKey,
 ): CapabilitySource | '' {
   const raw = (model?.capSources as Record<string, unknown> | undefined)?.[key]
-  return raw === 'upstream' || raw === 'modelsdev' || raw === 'user' ? raw : ''
+  return raw === 'upstream' || raw === 'modelsdev' || raw === 'observed' || raw === 'user'
+    ? raw
+    : ''
 }
 
 /** 来源短语（放在值后面；`upstream` 不给短语 —— 「继承上游」由调用方按场景措辞） */
 export function capabilitySourceText(source: CapabilitySource | ''): string {
   if (source === 'modelsdev') return t('（由 models.dev 补齐）')
+  if (source === 'observed') return t('（网关实测）')
   if (source === 'user') return t('（手动设定）')
   return ''
 }

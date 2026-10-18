@@ -263,11 +263,22 @@ fn current_turn_start(messages: &[Value]) -> usize {
     {
         return assistant + 1 + offset;
     }
-    // 情形 2：尾巴只有 tool / 其它，退回到那一条还没被答的 user
-    messages[..=assistant]
+    // 情形 2：尾巴只有 tool / 其它，退回到那一条还没被答的 user。
+    //
+    // ⚠️ 退到那一条之后还要**继续向前吞并连续的 user**：客户端常把「贴一张图」
+    // 和「补一句正文」拆成两条相邻的 user（见
+    // `a_second_user_message_in_the_same_turn_does_not_hide_the_image` 的
+    // 一手现场）。只退到**最后**一条 user 时，图在那条之前的那一条里，
+    // 判据扫不到 —— 一旦尾巴是 agent 循环常见的 `assistant(tool_calls) + tool`，
+    // 本轮刚贴的图就被当成历史剥掉。
+    let mut start = messages[..=assistant]
         .iter()
         .rposition(|message| is_role(message, "user"))
-        .unwrap_or(assistant + 1)
+        .unwrap_or(assistant + 1);
+    while start > 0 && is_role(&messages[start - 1], "user") {
+        start -= 1;
+    }
+    start
 }
 
 /// 这一层此刻要不要工作（= 请求里有图、且当前这一问不依赖图、且没被环境变量关掉）。
@@ -993,5 +1004,24 @@ mod strip_rules {
             "内部暂存字段不该被牵连"
         );
         assert_eq!("assistant", assistant["role"]);
+    }
+
+    #[test]
+    fn a_tool_tail_does_not_split_consecutive_user_messages_into_two_turns() {
+        // agent 循环的常见形状：客户端把「贴图」和「补正文」拆成两条连续 user，
+        // 之后模型发了 tool_calls、工具结果刚回来（尾巴是 tool）。
+        // 这一轮**还没答完**，那张图仍是本轮图 —— 判据只看最后一条 user 时，
+        // 它会退到第 2 条纯文本 user，扫不到第 1 条的图，于是把本轮图当历史剥掉。
+        let body = json!({"messages": [
+            {"role": "user", "content": parts_with_image("这图什么颜色")},
+            {"role": "user", "content": "补充：看这个报错"},
+            {"role": "assistant", "content": null, "tool_calls": [{"id": "c1"}]},
+            {"role": "tool", "tool_call_id": "c1", "content": "结果文本"},
+        ]});
+        assert!(
+            current_turn_needs_vision(&body),
+            "本轮还没答完（尾巴是 tool），连续 user 里的图仍是本轮图"
+        );
+        assert!(!strip_applies(&body), "因此整层不动，选路侧照旧剔掉不吃图的那几家");
     }
 }

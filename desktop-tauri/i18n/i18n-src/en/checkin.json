@@ -1,5 +1,6 @@
 {
   " · ": " · ",
+  "App 同款活动领取（slot → 状态 → 领取） · 无活动时记为待领取": "",
   "SOLO 的 checkin_credits 领取 · 按自然日 0 点刷新": "SOLO checkin_credits claims · reset at midnight (calendar day)",
   "UMID 组件安装失败：{error}": "UMID component installation failed: {error}",
   "WorkBuddy 国内版 · 查询任务树后一键点亮 / 领奖 · 含开学季与猫猫旅行 · 点击行展开明细": "WorkBuddy CN · Query the task tree, then light up / claim in one click · includes the school-season event and cat travel · click a row for details",

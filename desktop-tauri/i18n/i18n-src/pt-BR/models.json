@@ -354,6 +354,7 @@
   "（由 models.dev 补齐）": " (preenchido pelo models.dev)",
   "（登记后即可用这个名字请求）": " (após o registro, já pode solicitar com este nome)",
   "（续）": "(continuação) ",
+  "（网关实测）": "（Medido pelo gateway）",
   "（默认 ": " (padrão: ",
   "（默认绑定与别名 chips）；「清除」= 不给这些映射指定等级（选「不覆盖」的口径与映射弹窗一致）": " dos modelos selecionados (chips do vínculo padrão e aliases); “Limpar” = não atribuir nível a esses mapeamentos (mesmo critério de “Não sobrescrever” do diálogo de mapeamento)",
   "）": ")",

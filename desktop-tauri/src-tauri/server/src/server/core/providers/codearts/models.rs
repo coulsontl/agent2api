@@ -690,12 +690,26 @@ fn catalog_from_persisted() -> Option<Catalog> {
         let Some(source) = ModelSource::from_label(&text("source")) else {
             continue;
         };
+        // ── 旧福利缓存里的 `supportsImages: false` 一律丢弃 ──────────────
+        // 2026-10-17 之前，福利源在 `parse_benefit` 里被整批写死成
+        // `Some(false)`（那次实测的口径错了：测的是「福利网关这条通道收不收图」，
+        // 被记成了「模型不吃图」）。那批 false 已经落进磁盘缓存，而
+        // `catalog_cache` **不带有效期**、离线或刷新失败时会一直用 ——
+        // 只改写入侧救不了升级路径：老用户重启后读回的仍是 false，
+        // 带图请求继续被误剔。这里在**读取侧**把它丢掉，等价于「不知道」。
+        //
+        // 判据只认 `benefit` 源 + false：agent / builtin 的 false 是上游自己
+        // 在回包里给的（`model_parameters.supports_images`），那是真声明，不能动。
+        let supports_images = entry
+            .get("supportsImages")
+            .and_then(Value::as_bool)
+            .filter(|value| !(*value == false && source == ModelSource::Benefit));
         catalog.models.push(ModelConfig {
             display_name: if text("name").is_empty() { id.clone() } else { text("name") },
             description: text("description"),
             context_length: entry.get("contextWindow").and_then(Value::as_i64).unwrap_or(0),
             max_output_tokens: entry.get("maxOutputTokens").and_then(Value::as_i64).unwrap_or(0),
-            supports_images: entry.get("supportsImages").and_then(Value::as_bool),
+            supports_images,
             credit_display: text("credits"),
             name: id.clone(),
             source,
@@ -839,6 +853,7 @@ pub(crate) fn tests_sample_model() -> ModelConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
 
     // 真实响应抓于 2026-09-27（只读接口，零推理消耗），一字未改。
     const BUILTIN: &str = include_str!("catalog_fixtures/builtin.json");
@@ -1185,6 +1200,7 @@ mod restart_tests {
     //! 「模型列得出来、每一条都 503 目录没拉取过」。
     use crate::server::core::providers::catalog_cache;
     use crate::server::db::Db;
+    use serde_json::json;
 
     use super::*;
 
@@ -1350,5 +1366,40 @@ mod restart_tests {
         )
         .expect("agent 清单可解析");
         assert_eq!(Some(false), agent[0].supports_images, "上游明确给了 false 就原样收下");
+    }
+
+    /// 旧磁盘缓存里福利源的 `supportsImages: false` 要在**读取侧**丢掉。
+    ///
+    /// 2026-10-17 之前那批 false 是 `parse_benefit` 整批写死的（误标），已经落进
+    /// `catalog_cache`；那份缓存不带有效期，只改写入侧救不了升级路径 ——
+    /// 老用户重启后读回的仍是 false，带图请求继续被误剔。
+    #[test]
+    fn stale_benefit_false_is_dropped_when_the_catalog_is_read_back() {
+        let keep_variants = |source: &str, supports_images: Option<bool>| {
+            let mut entry = json!({"id": "m", "name": "M", "source": source});
+            if let Some(value) = supports_images {
+                entry["supportsImages"] = json!(value);
+            }
+            // 直接测判据那一行，不碰磁盘：与 `catalog_from_persisted` 同一条逻辑
+            entry
+                .get("supportsImages")
+                .and_then(Value::as_bool)
+                .filter(|value| {
+                    let benefit = ModelSource::from_label(source) == Some(ModelSource::Benefit);
+                    !(*value == false && benefit)
+                })
+        };
+        assert_eq!(
+            None,
+            keep_variants("benefit", Some(false)),
+            "福利源的旧 false 是误标，读回时丢掉（= 不知道，闸门放行）"
+        );
+        assert_eq!(
+            Some(false),
+            keep_variants("agent", Some(false)),
+            "agent 源的 false 是上游回包里的真声明，不能动"
+        );
+        assert_eq!(Some(true), keep_variants("benefit", Some(true)), "true 不动");
+        assert_eq!(None, keep_variants("benefit", None), "本来就没有的保持没有");
     }
 }

@@ -978,11 +978,15 @@ impl RequestTelemetry {
         self.flush_live(&guard);
     }
 
-    /// 给**最后一条**尝试明细记一条提示（目前只有代理回退直连）。
+    /// 给**最后一条**尝试明细记一条提示（代理回退直连 / 剥掉历史图片）。
     ///
-    /// **首次为准**（与 `note_error` 同一取向）：同一轮里代理提示只会有一条，
-    /// 后来的（例如重试时又算了一次）不该覆盖先到的那条根因。
-    /// 空串不写，理由同 [`Self::note_attempt_retry`]。
+    /// ── 为什么要**追加**而不是「首次为准」──────────────────────
+    /// 同一轮里可以同时发生两件事：账号代理不可用改走直连，以及向这家发送前
+    /// 剥掉了历史图片。两句话说的是不同的事，谁也不该顶掉谁。原来的
+    /// 「首次为准」让先到的代理提示占住槽位，剥图提示静默消失 —— 用户看到请求
+    /// 带图成功、却找不到「图去哪了」的任何记录。分隔符用中文分号，与请求日志
+    /// 里其它复合读数的写法一致；整段仍受 [`MAX_ATTEMPT_NOTICE_CHARS`] 截断
+    /// （极端情况下两句都很长，宁可截断也不让明细膨胀）。
     pub fn note_attempt_notice(&self, notice: &str) {
         let notice = notice.trim();
         if notice.is_empty() {
@@ -992,9 +996,13 @@ impl RequestTelemetry {
         let Some(last) = guard.attempts_detail.last_mut() else {
             return;
         };
-        if last.notice.is_none() {
-            last.notice = Some(truncate_chars(notice, MAX_ATTEMPT_NOTICE_CHARS));
-        }
+        let merged = match last.notice.as_deref() {
+            // 同一句话重复上报（重试时又算了一次代理回退）：保持一条，不堆叠
+            Some(existing) if existing.contains(notice) => existing.to_string(),
+            Some(existing) => format!("{existing}；{notice}"),
+            None => notice.to_string(),
+        };
+        last.notice = Some(truncate_chars(&merged, MAX_ATTEMPT_NOTICE_CHARS));
         // 在途回写：提示同样是「这一轮怎么走的」的一部分
         self.flush_live(&guard);
     }
@@ -1349,5 +1357,39 @@ mod body_bytes_observation {
         // 负数只可能来自手改的库：夹成 0，展示层不为一位数写分支
         telemetry.note_attempt_body_bytes(-5);
         assert_eq!(Some(0), telemetry.snapshot().attempts_detail[1].body_bytes);
+    }
+}
+
+#[cfg(test)]
+mod attempt_notice {
+    //! 同一轮里两条提示（代理回退 + 剥图）都要留下。
+
+    use super::*;
+
+    /// 回归 2026-10-17 审查的缺陷：原来的「首次为准」让先到的代理提示占住
+    /// 槽位，剥图提示静默消失 —— 用户看到请求成功、却查不到图去哪了。
+    #[test]
+    fn both_notices_survive_in_one_attempt() {
+        let telemetry = RequestTelemetry::new();
+        telemetry.note_attempt_started("codearts", "GT-a");
+        telemetry.note_attempt_notice("账号代理不可用，本次直连");
+        telemetry.note_attempt_notice("已剥掉 3 张历史图片（2.4 MB）");
+        let detail = &telemetry.snapshot().attempts_detail[0];
+        let notice = detail.notice.as_deref().unwrap_or("");
+        assert!(notice.contains("代理不可用"), "先到的提示不能被顶掉: {notice}");
+        assert!(notice.contains("剥掉"), "后到的提示也要留下: {notice}");
+        assert!(notice.contains('；'), "两句话用分号连接，读起来才不像一句错话");
+    }
+
+    /// 同一句话重复上报（重试时又算了一次代理回退）不堆叠。
+    #[test]
+    fn the_same_notice_is_not_repeated() {
+        let telemetry = RequestTelemetry::new();
+        telemetry.note_attempt_started("codearts", "GT-a");
+        telemetry.note_attempt_notice("账号代理不可用，本次直连");
+        telemetry.note_attempt_notice("账号代理不可用，本次直连");
+        let detail = &telemetry.snapshot().attempts_detail[0];
+        let notice = detail.notice.as_deref().unwrap_or("");
+        assert_eq!(1, notice.matches("账号代理不可用").count(), "重复上报要合并: {notice}");
     }
 }

@@ -66,6 +66,9 @@ const PROVIDER_DESC: Record<string, string> = {
   // 访客账号没有积分体系，实现会如实跳过（不算失败），说明里点出这一点，
   // 免得用户以为漏签了。
   chatglm: t('每日登录积分 · 顺带领取会员活动 · 访客账号无积分体系（跳过）'),
+  // LobsterAI：activity 系统的「slot → context → check_in」三步（与 App 同款），
+  // slot 没下发活动时返回中性未领取而不是失败。
+  lobster: t('App 同款活动领取（slot → 状态 → 领取） · 无活动时记为待领取'),
 }
 
 /** 页内标签页的档位（值与 checkin-state 的 CheckinTab 一致） */

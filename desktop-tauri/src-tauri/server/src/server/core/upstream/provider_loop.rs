@@ -545,24 +545,31 @@ pub(super) async fn forward_with_providers(
                 // 空链判断不成立，于是请求照样往下走，最后由 `attempt_queue`
                 // 以「没有可用账号，无账号可转发：请在账号页添加并启用账号」收尾
                 // —— 用户明明有账号，只是那家不吃图，那条文案把人引去账号页白找。
+                // 判据复用 `catalog::provider_available` 的**同一条**口径（账号记录
+                // 非空 **或** 环境变量凭证在场），别再手写一遍：
+                //   - 只数账号记录会漏掉只有 `WORKBUDDY_TOKEN` / `RACCOUNTS_TOKEN`
+                //     这类旁路凭证的家 —— 它们一条记录都没有，却完全能承接请求；
+                //   - 反过来只看「记录 enabled」会把 `enabled=true` 但没凭证的账号
+                //     算成可用（`has_credentials=false`），请求一路走到
+                //     「没有可用账号」的 503，而这条门禁本可以提前说明白。
                 // ⚠️ `list_accounts()` 返回的是**快照对象**
                 // `{currentAccountId, accounts: [...], providers: [...]}`，
                 // 不是数组 —— 直接 `as_array()` 会拿到 None，于是每一家都被判成
-                // 「没账号」，收窄后但凡有一家不吃图就把整条请求判死。
-                // 2026-10-17 生产实测：`deepseek-v4.1-flash` 只剔了 codearts 一家，
-                // 候选里 workbuddy / qoder / trae 等全都在，却被报成
-                // 「都不支持图片输入」—— 就是这个空数组造成的。
-                let accounts = service.store.list_accounts();
-                let accounts = accounts
-                    .get("accounts")
-                    .and_then(Value::as_array)
-                    .map(Vec::as_slice)
-                    .unwrap_or(&[]);
-                let usable = kept.iter().any(|id| {
-                    accounts.iter().any(|account| {
-                        account.get("provider").and_then(Value::as_str) == Some(id.as_str())
-                            && account.get("enabled").and_then(Value::as_bool) != Some(false)
-                    })
+                // 「没账号」。2026-10-17 生产实测：`deepseek-v4.1-flash` 只剔了
+                // codearts 一家，候选里 workbuddy / qoder / trae 等全都在，却被
+                // 报成「都不支持图片输入」。改用 `provider_available` 之后这条
+                // 形状坑也一并绕开了。
+                let usable = kept.iter().any(|id| match kind_from_id(id) {
+                    Some(kind) => crate::server::core::providers::catalog::provider_available(
+                        &service.store,
+                        kind,
+                    ),
+                    // 自定义家：`provider_available` 只看内置注册表，这里按它自己的
+                    // 「有启用账号且凭证可用」口径判（与自定义转发选路同源）。
+                    None => !service
+                        .store
+                        .accounts_for_provider(id)
+                        .is_empty(),
                 });
                 if !usable {
                     return Err(GatewayError::with_status(

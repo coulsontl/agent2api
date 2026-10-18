@@ -354,6 +354,7 @@
   "（由 models.dev 补齐）": " (filled in by models.dev)",
   "（登记后即可用这个名字请求）": " (you can request with this name once registered)",
   "（续）": "(cont.) ",
+  "（网关实测）": "（Measured by the gateway）",
   "（默认 ": "(default ",
   "（默认绑定与别名 chips）；「清除」= 不给这些映射指定等级（选「不覆盖」的口径与映射弹窗一致）": " of the selected models (default binding and alias chips); “Clear” means no level is assigned to these mappings (same as “Do not override” in the mapping dialog)",
   "）": ")",

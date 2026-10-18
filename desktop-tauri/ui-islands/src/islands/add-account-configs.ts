@@ -90,6 +90,15 @@ export type ProviderConfig = {
   /** 登录态是 Electron safeStorage 密文、解密要走 DPAPI（仅 Windows） */
   desktopWindowsOnly?: boolean
   /**
+   * 登录态路径是 macOS 专有的（`~/Library/Application Support/…`），
+   * 其他桌面平台必然失败。只有 LobsterAI 用到：它的 sqlite 路径写死在
+   * `providers::lobster::credentials::desktop_db_file`。
+   *
+   * 与 `desktopWindowsOnly` 同一个理由 —— 列出一个点下去必失败的按钮，
+   * 比不显示更糟。
+   */
+  desktopMacOnly?: boolean
+  /**
    * 「导入凭证文件」这一条来源的配置（有它才有那个分段）。
    *
    * 与 `desktop` 的语义差别（别混用，见后端 `api::accounts` 的文件导入契约）：
@@ -955,15 +964,17 @@ const CHATGLM: ProviderConfig = {
 const LOBSTER: ProviderConfig = {
   provider: 'lobster',
   label: 'LobsterAI',
-  manualTitle: '粘贴 accessToken / refreshToken',
-  manualNote: '两样都从 LobsterAI App 的登录态里来（macOS 客户端）。缺 refreshToken 的账号到期后无法自动续期，需要重新粘贴。',
+  manualTitle: t('粘贴 accessToken / refreshToken'),
+  manualNote: t('两样都从 LobsterAI App 的登录态里来（macOS 客户端）。缺 refreshToken 的账号到期后无法自动续期，需要重新粘贴。'),
   fields: [
-    { key: 'accessToken', label: 'accessToken', rows: 3, placeholder: '粘贴 accessToken（一长串 JWT，三段点分）' },
-    { key: 'refreshToken', label: 'refreshToken', rows: 2, placeholder: '必填，到期自动续期用它换新 token' },
-    { key: 'name', label: '备注名', optional: true, placeholder: '可选，留空自动生成' },
+    { key: 'accessToken', label: 'accessToken', rows: 3, placeholder: t('粘贴 accessToken（一长串 JWT，三段点分）') },
+    { key: 'refreshToken', label: 'refreshToken', rows: 2, placeholder: t('必填，到期自动续期用它换新 token') },
+    { key: 'name', label: t('备注名'), optional: true, placeholder: t('可选，留空自动生成') },
   ],
-  desktopNote: '读本机 LobsterAI App 当前登录态，每次实时读取（删掉这条记录不影响 App 登录态）。App 重新登录后重新导入即可。',
-  desktopHint: '读取 ~/Library/Application Support/LobsterAI/lobsterai.sqlite，需已在 LobsterAI App 登录（仅 macOS）',
+  desktopNote: t('读本机 LobsterAI App 当前登录态，每次实时读取（删掉这条记录不影响 App 登录态）。App 重新登录后重新导入即可。'),
+  desktopHint: t('读取 ~/Library/Application Support/LobsterAI/lobsterai.sqlite，需已在 LobsterAI App 登录（仅 macOS）'),
+  // 后端路径写死 macOS 的 Application Support，其他桌面平台点了必然失败
+  desktopMacOnly: true,
 }
 
 /** 内置家的表单块，顺序与旧 ADD_FORMS 一致（只影响 DOM 里的块顺序，不影响界面） */
@@ -1110,6 +1121,9 @@ export function desktopImportAvailable(config: ProviderConfig): boolean {
   const current = platform()
   if (current === 'web') return false
   if (config.desktopWindowsOnly && current !== 'windows') return false
+  // 反向的同一件事：路径写死在 macOS 的家，其他平台必然读不到文件。
+  // 空串（浏览器直开）按「不裁剪」处理 —— 理由见上面 `platform()` 的说明。
+  if (config.desktopMacOnly && current !== '' && current !== 'macos') return false
   return true
 }
 

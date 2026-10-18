@@ -700,9 +700,14 @@ pub fn claim_pending(claim: &Value) -> bool {
     // 「暂无可领取活动」是运营活动还没下发（再过一阵可能就有），「等待重试」是
     // 被本地那两道写闸挡住（今天还有额度、只是间隔没到）—— 两者都该让定时链
     // 稍后重试，而不是记成失败。改那边的文案时这两条也要跟着改。
+    //
+    // LobsterAI 的「当前无可用签到活动」（`providers::lobster::checkin` 的
+    // `fetch_checkin_state` 返回 None）同样是 slot 此刻没下发活动 —— 实现自己
+    // 就把它当「无活动」而不是错误，这里不认的话台账会把它归为 `failed`。
     message.contains("没有可领取的签到活动")
         || message.contains("未下发每日积分活动")
         || message.contains("暂无可领取活动")
+        || message.contains("当前无可用签到活动")
         || message.contains("等待重试")
 }
 
@@ -849,7 +854,7 @@ mod tests {
     //! 「放行了却仍判不出已完成」（面板不亮）或「判得出但先被丢成 Err」（`claim`
     //! 为 null）这两种半截修复。`closed_loop_tolerated_400_reaches_completed` 把
     //! 这条链整条钉住，是本次修复（上游 issue #137）唯一的端到端回归保护。
-    use super::checkin_completed_today;
+    use super::{checkin_completed_today, claim_pending};
     use crate::server::core::billing::request::BillingCall;
     use crate::server::core::billing::{is_duplicate_claim, normalize_daily_claim, BillingService};
     use serde_json::{json, Value};
@@ -920,6 +925,35 @@ mod tests {
             checkin_completed_today(&claim),
             "放行了却判不出已完成 —— 上游与下游的文案判据已经脱钩"
         );
+    }
+
+    /// 中性结果（「此刻没有可领的活动」）与真正的失败必须分开。
+    ///
+    /// 这是**跨模块的文案契约**：各家实现自己造 `msg`，本模块靠字面量认。
+    /// LobsterAI 新增时漏了登记，结果「slot 没下发活动」在台账里被记成
+    /// `failed`（用户看到红色失败，而那是上游当天就没开活动）。
+    #[test]
+    fn pending_wording_is_neutral_not_failed() {
+        for msg in [
+            "当前无可用签到活动",     // lobster::checkin
+            "暂无可领取活动",         // codearts::welfare
+            "没有可领取的签到活动",   // qoder 两个地区
+            "未下发每日积分活动",     // qoder
+            "等待重试",               // codearts 写闸
+        ] {
+            assert!(
+                claim_pending(&json!({"success": false, "msg": msg})),
+                "{msg:?} 应算「等窗口重试」，不该记成失败"
+            );
+        }
+        // 真正的失败不能被当成 pending（否则坏账号整天重试打上游）
+        for claim in [
+            json!({"success": false, "error": "连接上游超时", "msg": "当前无可用签到活动"}),
+            json!({"success": false, "msg": "登录态已过期或被拒绝"}),
+            json!({"success": true, "msg": "今日已签（App 或本网关此前已领）"}),
+        ] {
+            assert!(!claim_pending(&claim), "不该被判成 pending: {claim}");
+        }
     }
 
     #[test]

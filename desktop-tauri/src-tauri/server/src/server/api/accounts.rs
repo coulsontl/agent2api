@@ -1708,6 +1708,14 @@ pub async fn refresh_account(state: &ServerState, body: &Bytes) -> Response {
     if state.store().antigravity_account_record(&id).is_some() {
         return refresh_provider_account(state, &id, ProviderKind::Antigravity).await;
     }
+    // LobsterAI：**有**可刷新的 refreshToken（`POST /api/auth/refresh`），
+    // 手动账号回写账号记录、桌面账号回写 App 的 sqlite（比较守卫见
+    // `lobster::credentials`）。漏了这条分派，用户的 Lobster refreshToken 会被
+    // 当成工作台的 `X-Refresh-Token` 发往腾讯鉴权端点 —— 既是凭证外泄，刷新也
+    // 必然失败，用户看到的还是腾讯侧的报错文案。
+    if state.store().lobster_account_record(&id).is_some() {
+        return refresh_provider_account(state, &id, ProviderKind::Lobster).await;
+    }
     // WorkBuddy 系（国内版 / 国际版）的兜底：两条链路都按**账号自己的**
     // endpoint / prefixPath / platform / edition 续期
     // （`AuthService::refresh_account_inner` 从记录里读，见那里的说明），

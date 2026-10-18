@@ -35,11 +35,14 @@ use crate::server::core::providers::{
 /// 记录（读的是同一个 `auth.json`，但归不同的 provider），因此两个 id 都要
 /// 保留 —— 漏了国际版那个，它的桌面端记录就能被当成普通账号导入，然后因为
 /// 「不落 token」而永远 `available: false`。
-pub(super) const RESERVED_DESKTOP_IDS: [&str; 4] = [
+pub(super) const RESERVED_DESKTOP_IDS: [&str; 5] = [
     crate::server::core::providers::raccoon::credentials::DESKTOP_ACCOUNT_ID,
     crate::server::core::providers::catpaw::credentials::DESKTOP_ACCOUNT_ID,
     crate::server::core::account_store::autoclaw_accounts::DESKTOP_ACCOUNT_ID,
     crate::server::core::account_store::autoclaw_accounts::INTL_DESKTOP_ACCOUNT_ID,
+    // LobsterAI 桌面端导入在 2026-10-17 改成了固定 id（此前按 jwt exp 派生，
+    // 会重复导入出多条）。保留它，防止手工构造的导入记录占住这个 id。
+    crate::server::core::providers::lobster::credentials::DESKTOP_ACCOUNT_ID,
 ];
 
 pub(super) fn is_reserved_desktop_id(id: &str) -> bool {
@@ -265,6 +268,23 @@ pub(super) fn identity_of_item(provider: &str, item: &Map<String, Value>) -> Res
         }
         return Err("缺少 accessToken 与 id（无法标识 Command Code 账号）".to_string());
     }
+    // LobsterAI：与 Command Code 同口径 —— 凭证就是身份。记录上只有
+    // accessToken / refreshToken / tokenTail，没有 userId / uid，少了这一支
+    // 会落进下面的 userId 兜底，导出后再导入报「缺少 userId」整条失败。
+    // 用 accessToken 而非 refreshToken：添加路径的覆盖判据就是「同 id 且
+    // accessToken 一致」（见 `add_lobster_account`），两处同源才不会出现
+    // 「导入说是新账号、添加说是同一个」的分叉。
+    if provider == kind_id(ProviderKind::Lobster) {
+        let access_token = text("accessToken");
+        if !access_token.is_empty() {
+            return Ok(access_token);
+        }
+        let id = text("id");
+        if !id.is_empty() {
+            return Ok(id);
+        }
+        return Err("缺少 accessToken 与 id（无法标识 LobsterAI 账号）".to_string());
+    }
     if user_id.is_empty() {
         return Err(format!("缺少 userId（无法标识 {provider} 账号）"));
     }
@@ -358,6 +378,15 @@ pub(super) fn identity_of_record(provider: &str, record: &StoredAccount) -> Opti
     // Command Code：accessToken（= API Key）即身份，缺则账号 id ——
     // 与 `identity_of_item` 同口径
     if provider == kind_id(ProviderKind::CommandCode) {
+        let access_token = record.access_token().trim().to_string();
+        if !access_token.is_empty() {
+            return Some(access_token);
+        }
+        let id = record.id().trim().to_string();
+        return (!id.is_empty()).then_some(id);
+    }
+    // LobsterAI：accessToken 即身份，缺则账号 id —— 与 `identity_of_item` 同口径
+    if provider == kind_id(ProviderKind::Lobster) {
         let access_token = record.access_token().trim().to_string();
         if !access_token.is_empty() {
             return Some(access_token);
@@ -461,5 +490,48 @@ mod tests {
             identity_of_item("trae", &item(json!({"uid": "777"}))).expect("缺 variant 按 solo"),
         );
         assert!(identity_of_item("trae", &item(json!({"uid": "  ", "userId": "51029416092912"}))).is_err(), "空 uid 不能拿 userId 凑");
+    }
+
+    /// LobsterAI 没有 uid / userId，身份只能落在 accessToken 上。
+    ///
+    /// 回归「导得出去、导不回来」：落进兜底的症状是导入时报
+    /// 「缺少 userId（无法标识 lobster 账号）」整条失败。判据要与添加路径的
+    /// 「同 id 且 accessToken 一致」同源 —— 用 refreshToken 当身份会在服务端
+    /// 轮换 refreshToken 后失去幂等性。
+    #[test]
+    fn lobster_identity_is_the_access_token_and_never_falls_through_to_userid() {
+        let imported = item(json!({
+            "accessToken": "at-123", "refreshToken": "rt-456", "id": "lobster-1700000000"
+        }));
+        assert_eq!(
+            "at-123",
+            identity_of_item("lobster", &imported).expect("应识别出身份")
+        );
+        // 空 token 退到账号 id（与自定义家 / Command Code 同一种兜底）
+        assert_eq!(
+            "lobster-1700000000",
+            identity_of_item(
+                "lobster",
+                &item(json!({"accessToken": "  ", "id": "lobster-1700000000"}))
+            )
+            .expect("空 token 退到 id")
+        );
+        assert!(
+            identity_of_item("lobster", &item(json!({"userId": "u1"}))).is_err(),
+            "不许拿 userId 凑 —— 本家记录根本没有这个字段"
+        );
+
+        // 导出侧与本机侧必须同口径（判重靠两者一致）
+        let csv = |fields: &[(&str, &str)]| {
+            let mut map = Map::new();
+            for (key, value) in fields {
+                map.insert((*key).to_string(), json!(value));
+            }
+            StoredAccount::from_map(map)
+        };
+        assert_eq!(
+            identity_of_record("lobster", &csv(&[("accessToken", "at-123")])),
+            identity_of_item("lobster", &imported).ok(),
+        );
     }
 }

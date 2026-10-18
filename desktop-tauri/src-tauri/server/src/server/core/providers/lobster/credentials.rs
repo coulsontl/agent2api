@@ -332,17 +332,28 @@ fn desktop_credentials() -> Result<LobsterCredentials, GatewayError> {
 
 /// 取指定账号的凭证快照（**同步**：不持锁跨 await）。
 ///
-/// `account_id` 为空 → 用 LobsterAI 组内的当前账号；没有账号记录时回落到
-/// 桌面端实时登录态（那台机器上的「默认登录态」就是 App 登录的那个）。
+/// `account_id` 为空 → 用 LobsterAI 组内的当前账号；**一个账号记录都没有**时
+/// 回落到桌面端实时登录态（那台机器上的「默认登录态」就是 App 登录的那个）。
 /// `desktop=true` 的记录实时读 sqlite（凭证按设计活在 App 的库里，记录里的
 /// 副本只用于导入那一刻的展示）。
+///
+/// ⚠️ **显式 id 找不到记录时绝不回落桌面凭证**：调用方（签到 / 余额 / 适配器）
+/// 拿的是用户点名或计划里算出的账号，记录不存在说明它刚被删或已失效。此时回落
+/// 桌面登录态会把本机 App 的凭证算到那条不存在的账号头上 —— 余额显示在被删账号
+/// 名下、签到台账落一条对不上记录的账。宁可报 401 让调用方如实失败。
 pub fn snapshot_for(
     store: &AccountStore,
     account_id: &str,
 ) -> Result<LobsterCredentials, GatewayError> {
     let record = store.lobster_account_record(account_id);
     let Some(record) = record else {
-        return desktop_credentials();
+        if account_id.trim().is_empty() {
+            return desktop_credentials();
+        }
+        return Err(GatewayError::with_status(
+            401,
+            format!("LobsterAI 账号不存在或已被删除: {account_id}"),
+        ));
     };
     let is_desktop = record.get("desktop").and_then(Value::as_bool).unwrap_or(false)
         || record.get("id").and_then(Value::as_str) == Some(DESKTOP_ACCOUNT_ID);

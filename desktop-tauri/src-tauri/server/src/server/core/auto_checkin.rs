@@ -213,24 +213,28 @@ pub fn default_providers() -> Vec<String> {
 /// 会让这一家的勾选框再也取消不掉（读完就补回来，界面上表现为「取消勾选没反应」）。
 /// 所以补齐只做一次，靠配置里的版本号记账；版本一旦写上去，用户之后再取消勾选
 /// 就真的生效了。执行点见 `checkin_schedules::extend_providers_once`。
-pub const PROVIDERS_VERSION: i64 = 4;
+pub const PROVIDERS_VERSION: i64 = 5;
 
 /// 「哪一版加入的家」——条目清单的版本低于它 = 这家还没被提供过 ⇒ 补进去。
-/// 版本 1 = 多条目改造上线时的形态（9 家；`qoder-intl` 由 `normalize_providers`
-/// 的存量兼容规则跟着 `qoder` 带上，不在这里重复登记）。
+/// 版本 1 = 多条目改造上线时的形态（12 家：基础 9 家 + `kuku` / `officeace` /
+/// `codearts`；后两家与 `kuku` 都是随那次改造一起进清单的，只有前两家登记成
+/// 版本 2。`qoder-intl` 由 `normalize_providers` 的存量兼容规则跟着 `qoder`
+/// 带上，不在这里重复登记）。
 ///
 /// ⚠️ **版本号是「这一版加了哪几家」的记账，不是代码版本的序号** —— 合并上游
 /// 时最容易撞的就是它：上游 v3.0.8 用 3 装了 chatglm，本分支随后用 4 装
 /// ModelScope 的两站。两家都必须保留各自的版本号，谁都不许覆盖谁，
 /// 否则先升级到那一边的用户永远补不进另一边的家（版本号已经写进配置了）。
 ///
-/// 版本 3 = chatglm（上游 v3.0.8）；版本 4 = ModelScope 国内版 / 国际版。
-const PROVIDERS_ADDED_IN: [(&str, i64); 5] = [
+/// 版本 3 = chatglm（上游 v3.0.8）；版本 4 = ModelScope 国内版 / 国际版；
+/// 版本 5 = LobsterAI。
+const PROVIDERS_ADDED_IN: [(&str, i64); 6] = [
     ("officeace", 2),
     ("codearts", 2),
     ("chatglm", 3),
     ("modelscope", 4),
     ("modelscope-intl", 4),
+    ("lobster", 5),
 ];
 
 /// 版本 `version` 之后才加入清单的家（按注册顺序）。空数组 = 这一版没有新家，
@@ -1639,6 +1643,47 @@ mod tests {
         assert_eq!(
             next_run_at_ms("07:20", 30, false, now),
             Some(tomorrow.timestamp_millis())
+        );
+    }
+
+    /// 每家在 [`CHECKIN_PROVIDERS`] 里出现的加签家都必须在 [`PROVIDERS_ADDED_IN`]
+    /// 登记过版本。
+    ///
+    /// 这条是 2026-10-17 审查抓到的真缺口：LobsterAI 加进了清单却没登记，
+    /// 存量定时条目因此**永远**补不进这家（版本号停在 4，`extend_providers_once`
+    /// 直接早退）。清单长度改对了会掩盖登记表的遗漏 —— 两处是手写维护、
+    /// 编译器不会提醒，只能靠这条断言。
+    ///
+    /// 基线（版本 1）是**版本机制引入时**的那份清单（`7b1beca`）：初版 12 家里
+    /// 除 officeace / codearts 之外都算版本 1，按设计不登记。注意常量上方的注释
+    /// 写的是「9 家」，那是**旧的**手工统计 —— 以这份名单为准。
+    #[test]
+    fn every_appended_checkin_provider_is_registered_with_a_version() {
+        const INITIAL_VERSION_ONE: [&str; 10] = [
+            "workbuddy", "workbuddy-intl", "raccoon", "autoclaw", "autoclaw-intl",
+            "qoder", "qoder-intl", "trae", "loomy", "kuku",
+        ];
+        for id in CHECKIN_PROVIDERS {
+            if INITIAL_VERSION_ONE.contains(&id) {
+                continue;
+            }
+            assert!(
+                PROVIDERS_ADDED_IN.iter().any(|(added, _)| *added == id),
+                "{id} 在 CHECKIN_PROVIDERS 里但没登记进 PROVIDERS_ADDED_IN —— 存量用户的定时条目永远补不进这家"
+            );
+        }
+        // 反向：登记表里每一条也得真的在清单里（改名/删家时抓出来）
+        for (id, _) in PROVIDERS_ADDED_IN {
+            assert!(
+                CHECKIN_PROVIDERS.contains(&id),
+                "PROVIDERS_ADDED_IN 登记了 {id}，但它已不在 CHECKIN_PROVIDERS 里"
+            );
+        }
+        // 版本号必须盖过登记表里最大的那一版，否则新版本登记的家会被早退吞掉
+        let highest = PROVIDERS_ADDED_IN.iter().map(|(_, at)| *at).max().unwrap_or(1);
+        assert_eq!(
+            PROVIDERS_VERSION, highest,
+            "PROVIDERS_VERSION 必须等于登记表里的最高版本，否则新登记的家补不进去"
         );
     }
 }

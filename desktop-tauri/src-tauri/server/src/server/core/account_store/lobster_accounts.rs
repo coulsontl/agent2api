@@ -298,9 +298,20 @@ impl AccountStore {
     }
 
     /// 桌面端实时登录态导入：从本机 sqlite 读凭证，落到同一份存储。
+    ///
+    /// ── 固定 id（2026-10-17 修）─────────────────────────────
+    /// 以前借道 `add_lobster_account`，而它的 id 是 `lobster-{jwt exp}` 派生的
+    /// —— App 重新登录或 token 轮换后 exp 一变，再点一次「导入桌面端登录态」
+    /// 就**新加一条**而不是更新旧的：账号列表里出现两条读同一份 sqlite 的
+    /// 桌面账号，转发队列、余额查询、签到分组全部重复计一次。桌面端登录态在
+    /// 一台机器上**只有一个**，与 raccoon / autoclaw 一样用固定 id。
+    ///
+    /// 与 `add_lobster_account` 的另一处差异：桌面账号**仍落一份 token 副本**
+    /// （转发读的是 sqlite 实时值，见 `live_desktop_credentials`；副本只服务
+    /// 导入那一刻的展示，并作为 sqlite 不可读时的诊断线索）。
     pub fn import_lobster_desktop_account(
         &self,
-        _source: &str,
+        source: &str,
     ) -> Result<Value, AccountStoreError> {
         let (access, refresh) = snapshot_for_desktop().map_err(|e| {
             AccountStoreError::new(
@@ -308,39 +319,76 @@ impl AccountStore {
                 401,
             )
         })?;
-        let payload = json!({
-            "accessToken": access,
-            "refreshToken": refresh,
-        });
-        let account = self.add_lobster_account(&payload, None)?;
-        // 把 source 标记为 desktop，add_lobster_account 里默认是 manual
-        let id = account
-            .get("id")
-            .and_then(Value::as_str)
-            .ok_or_else(|| AccountStoreError::new("导入返回缺少 id", 500))?
-            .to_string();
         let guard = self.guard();
-        if let Some(mut record) = self.record_by_id(&guard, &id) {
-            record
-                .fields_mut()
-                .insert("source".to_string(), Value::String("desktop".to_string()));
-            record
-                .fields_mut()
-                .insert("desktop".to_string(), Value::Bool(true));
-            record
-                .fields_mut()
-                .insert("updatedAt".to_string(), Value::from(logging::now_ms()));
-            let updated = record.clone();
-            self.with_conn(&guard, |conn| sql::put(conn, &updated))?;
+        let id = crate::server::core::providers::lobster::credentials::DESKTOP_ACCOUNT_ID.to_string();
+        let existing = self.record_by_id(&guard, &id);
+        let priority = match existing.as_ref() {
+            Some(record) => record.priority(),
+            None => self
+                .with_conn(&guard, sql::priorities_all)
+                .unwrap_or_default()
+                .pipe(|used| next_free_priority(&used)),
+        };
+        let now = logging::now_ms();
+        let jwt_exp = crate::server::core::providers::lobster::credentials::jwt_exp_seconds(&access);
+        let mut record = Map::new();
+        record.insert("id".to_string(), Value::String(id.clone()));
+        record.insert("provider".to_string(), Value::String(lobster_id().to_string()));
+        record.insert(
+            "name".to_string(),
+            Value::String(
+                existing
+                    .as_ref()
+                    .map(StoredAccount::name)
+                    .filter(|name| !name.is_empty())
+                    .unwrap_or_else(|| "LobsterAI 桌面端".to_string()),
+            ),
+        );
+        record.insert("tokenTail".to_string(), Value::String(token_tail(&access)));
+        record.insert(
+            "accessToken".to_string(),
+            Value::String(access.clone()),
+        );
+        record.insert("refreshToken".to_string(), Value::String(refresh));
+        if let Some(exp) = jwt_exp {
+            record.insert("jwtExpiresAt".to_string(), json!(exp));
         }
+        record.insert("desktop".to_string(), Value::Bool(true));
+        record.insert("source".to_string(), Value::String(source.to_string()));
+        record.insert("priority".to_string(), Value::from(priority));
+        record.insert(
+            "enabled".to_string(),
+            Value::Bool(existing.as_ref().map(StoredAccount::enabled).unwrap_or(true)),
+        );
+        record.insert(
+            "addedAt".to_string(),
+            Value::from(
+                existing
+                    .as_ref()
+                    .map(StoredAccount::added_at)
+                    .filter(|value| *value != 0)
+                    .unwrap_or(now),
+            ),
+        );
+        record.insert("updatedAt".to_string(), Value::from(now));
+        let mut merged = record;
+        if let Some(existing) = existing.as_ref() {
+            for (key, value) in existing.fields() {
+                merged.entry(key.clone()).or_insert_with(|| value.clone());
+            }
+        }
+        let saved = StoredAccount::from_map(merged);
+        self.with_conn(&guard, |conn| sql::put(conn, &saved))?;
         logging::log(
             "[Accounts]",
             &format!(
-                "✅ LobsterAI 桌面端登录态已导入: {}",
-                account.get("name").and_then(Value::as_str).unwrap_or("(unnamed)")
+                "{} LobsterAI 桌面端登录态{}: {}",
+                if existing.is_some() { "🔄" } else { "✅" },
+                if existing.is_some() { "已刷新" } else { "已导入" },
+                saved.name(),
             )
         );
-        Ok(account)
+        Ok(self.public_account(&saved))
     }
 
     /// 公开形态（进面板账号列表与 `/api/accounts`；仿 `to_raccoon_public_account`）。

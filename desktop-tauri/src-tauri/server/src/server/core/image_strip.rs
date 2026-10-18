@@ -1,8 +1,6 @@
 //! **历史图片剥离**：把上下文里那些「已经被答过、这一问也用不上」的旧图摘掉。
 //!
-//! ── 两条判据（各自有出处，都不是防御性检查）─────────────────
-//!
-//! ① **这家不吃图**（[`StripReason::HomeRefusesImages`]）
+//! ── 唯一的判据：这家不吃图（[`StripReason::HomeRefusesImages`]）────
 //! 识图闸门（`providers::catalog::routing::entry_refuses_images` 那套）按目录把
 //! 不吃图的家从候选里**剔掉**。那是对的，但它有一个副作用：长会话里图往往全在
 //! **历史轮**（Qoder 那种 300 多条消息 / 6 MB 的上下文，截图是二十几轮前贴的），
@@ -11,22 +9,29 @@
 //! 优先级低得多的家。用户看到的正是这个现象：`deepseek-v4.1-flash` 明明有
 //! pri=2 的 codearts，却条条走 pri=26 的 trae。
 //!
-//! ② **这叠历史图的体积越过预算**（[`StripReason::HistoryImagesOverBudget`]）
-//! 能吃图 ≠ 该把这叠图原样重发。一手读数（dev 3066，2026-10-15）：同一份
-//! **16,341,828 字节**的会话里有 169 个图片块（日志 `已转换 169 个图片块`），
-//! 平均每块约 96 KB ⇒ 图几乎就是全部体积；而同一家实测能收下的最大体是
-//! 2,014,731 字节。客户端每轮把全部历史重发一遍（BYOK 客户端不自动压缩上下文），
-//! 于是那叠二十几轮前的截图每一轮都跟着上链一次：换不来任何本轮用得上的信息，
-//! 换来的是撞上游的长度墙（业务层 400 / APIG 413）与一长串「408 客户端在转发
-//! 完成前断开」。判据因此不只挂在那家能不能吃图上。
+//! ── 刻意**不**做的那一条：按体积剥（2026-10-18 收窄）─────────────
+//! 收窄前还有第二支：**这叠历史图的体积越过 2 MiB** 就剥，与这家能不能吃图无关。
+//! 它的依据是真的 —— 一手读数（dev 3066，2026-10-15）：同一份 **16,341,828 字节**
+//! 的会话里有 169 个图片块，平均每块约 96 KB ⇒ 图几乎就是全部体积；而实测能收下
+//! 的最小那家只吃 **2,014,731 字节**的整份请求。客户端每轮把全部历史重发一遍
+//! （BYOK 客户端不自动压缩上下文），于是那叠旧截图每轮都跟着上链一次：换不来
+//! 本轮用得上的信息，换来的是撞上游的长度墙（业务层 400 / APIG 413）与一长串
+//! 「408 客户端在转发完成前断开」。
+//!
+//! 去掉它的理由是**影响面**：那一支对**所有**家生效，包括明确能吃图的家 ——
+//! 它会静默改写这些家收到的请求体（图被换成占位文本），而这次改动要解决的只是
+//! 「请求带图落到不吃图的家上」这一类。要让本层的作用范围停在**显式声明不吃图的家**
+//! 上，体积那一支就没有容身之处：声明不吃图的家已经由上面那条判据覆盖，
+//! 且优先于它 —— 留着就是一条永远走不到的分支。⚠️ 所以这里是**收窄**不是漏做；
+//! 要把它作为独立的「长度墙缓解」再加回来时，得先想清楚它对能吃图的家意味着什么
+//! （那时它该带自己的开关，并且措辞要如实 —— 别告诉模型"这家不吃图"）。
 //!
 //! ── 唯一的硬边界：当前这一轮的图绝不剥 ────────────────────
 //! 剥图不能恢复信息。当前问题依赖那张图时（"这张报错截图第三行写了什么"），
 //! 剥掉必然答错，而且错得很像成功（200 + 一段编出来的话）。这一层因此只服务
 //! 一种请求：**当前这一轮里没有任何 user 消息带图片**。含图就整层不动，退回今天的
 //! 行为（剔家）。这条判据是 `current_turn_needs_vision`，它是本模块存在的
-//! 全部前提，不是防御性检查 —— **预算那一支也不例外**：图再大，只要是这一问
-//! 要用的，就一个字节都不动。
+//! 全部前提，不是防御性检查：图再大，只要是这一问要用的，就一个字节都不动。
 //!
 //! ── 形状：转发层只可能看到一种图 ─────────────────────────
 //! 三个入口都在进本层之前折成 chat 形态（用例见 `upstream::provider_loop` 的
@@ -41,21 +46,16 @@
 //! 直接把图删干净、别的字节都不动，模型会面对一个"少了一张图但没人告诉它"的
 //! 上下文，于是它可能凭空补一段描述。留一句占位文本才让它能如实回答"我看不到
 //! 那张图"。每条消息**只留一句**（哪怕它原本有 3 张图）：三句重复的占位符会把
-//! 上下文搞脏，而信息量与一句相同。⚠️ **占位文本按理由分开**（[`StripReason`]）：
-//! "该上游不支持图像输入"在预算那一支上是假话（这家明明能吃图），模型据此劝用户
-//! "换个能看图的供应商"就是这么来的。
+//! 上下文搞脏，而信息量与一句相同。措辞必须**如实**：这家确实不接受图像输入，
+//! 所以模型据此回答"我看不到那张图"是对的（假话会让它给用户"换个能看图的供应商"
+//! 这类错的建议 —— 收窄前那一支就踩过这个，见上面「刻意不做的那一条」）。
 //!
-//! ── 两处开关 ────────────────────────────────────────────
-//! `AGENT2API_NO_IMAGE_STRIP=1` 整层关闭，退回"剔家"；
-//! `AGENT2API_NO_IMAGE_BUDGET=1` 只关**预算那一轴**（能力那一轴照旧），留给
-//! 预算数值定错时的一格 —— 与 zcode 那边的 `ZCODE_REQUIRE_CAPTCHA` 同一取向：
-//! 判错的兜底不该依赖发版。
+//! ── 一处开关 ────────────────────────────────────────────
+//! `AGENT2API_NO_IMAGE_STRIP=1` 整层关闭，退回"剔家"。
 //!
 //! ── 硬约束 ────────────────────────────────────────────────
 //! release 是 `panic=abort`：本文件零 unwrap/expect/panic；且**能不复制就不复制**
 //! （没图可剥时返回 `None`，让调用点继续借用原始 body，与 `sanitize_body` 同一口径）。
-//! 体积读数也守着这一条：只累加 `image_url.url` 的串长，**不序列化整份 body**
-//! （十几 MB 的体序列化一遍就是十几 MB 的额外拷贝与一次 GC）。
 
 use serde_json::{json, Value};
 
@@ -63,25 +63,7 @@ use serde_json::{json, Value};
 /// 用户在问一张不存在的图。
 const MARKER_TEXT_REFUSES: &str = "[图片已在转发时移除：该上游不接受图像输入]";
 
-/// 预算那一支的占位文本。**必须与上面那句不同**：这家是能吃图的，只是这叠历史图
-/// 太占地方；写成"不支持图像输入"会让模型给用户一句错的建议。
-const MARKER_TEXT_BUDGET: &str = "[图片已在转发时移除：历史图片占用过大，已省略]";
-
 const MARKER_PART: &str = "text";
-
-/// 历史图片的体积预算（字节）：越过它，这叠图就不再原样重放。
-///
-/// ── 这个数是怎么来的 ────────────────────────────────────
-/// 取 **2 MiB**，锚点是我们实测过的最紧那家：loomy 能收下的整份请求体上限是
-/// **2,014,731 字节**（同一家 12,642,504 字节那批全被拒）。历史图自己就越过这条线
-/// 时，这叠图已经比那家能收下的**整份请求**还大 —— 无论本轮文字多短都必然撞墙，
-/// 而它在别的家换来的也只是"能不能再多塞几兆"的余量，不值这个险。
-/// 反面参照：codearts 的墙在 6 MiB 附近、officeace 实测 13,500,858 字节仍能过 ——
-/// 所以这条预算**不是**各家墙的最小值，是"这叠图已经大到不值得为它冒险"的那条线。
-///
-/// ⚠️ 这是**第一版手定的数**，不是量出来的最优解（没有"在哪个阈值上答案质量开始
-/// 变差"的读数）。定错了用 `AGENT2API_NO_IMAGE_BUDGET=1` 整轴关掉，别改发版。
-const HISTORY_IMAGE_BUDGET_BYTES: u64 = 2 * 1024 * 1024;
 
 /// 一次剥图的产物。
 pub struct Stripped {
@@ -103,24 +85,21 @@ impl Stripped {
     }
 }
 
-/// 这一层为什么动手。两支的**模型可见文本**不同，理由见 [`StripReason::marker_text`]。
+/// 这一层为什么动手。目前只有一支（见模块头「刻意不做的那一条」）。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum StripReason {
     /// 目录说这家不吃图 —— 剥了才留得住这家（判据在发送侧按目录读）
     HomeRefusesImages,
-    /// 历史图片的体积越过预算 —— **与这家能不能吃图无关**
-    HistoryImagesOverBudget,
 }
 
 impl StripReason {
     /// 模型看到的那句占位文本。
     ///
-    /// 两支必须分开：预算那一支上这家是能吃图的，告诉模型"该上游不接受图像输入"
-    /// 是假话，而它会据此给用户"换个能看图的供应商"这类错的建议。
+    /// 措辞必须**如实**：这支上这家确实不接受图像输入（说成"图太大已省略"之类的
+    /// 反话会让模型给用户错的建议）。
     fn marker_text(self) -> &'static str {
         match self {
             StripReason::HomeRefusesImages => MARKER_TEXT_REFUSES,
-            StripReason::HistoryImagesOverBudget => MARKER_TEXT_BUDGET,
         }
     }
 }
@@ -148,10 +127,6 @@ impl StripNotice {
                 "该上游不接受图像输入，已剥离历史图片 {} 张（当前这一问不依赖图片）",
                 self.removed
             ),
-            StripReason::HistoryImagesOverBudget => format!(
-                "历史图片体积越过预算，已剥离 {} 张（当前这一问不依赖图片）",
-                self.removed
-            ),
         }
     }
 }
@@ -166,21 +141,6 @@ fn strip_disabled() -> bool {
             .to_ascii_lowercase();
         matches!(raw.as_str(), "1" | "true" | "yes" | "on")
     })
-}
-
-/// 关掉**预算那一轴**的开关（能力那一轴不受它影响）。读一次定死。
-fn budget_axis_disabled() -> bool {
-    static DISABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *DISABLED.get_or_init(|| budget_axis_disabled_from(std::env::var("AGENT2API_NO_IMAGE_BUDGET").ok().as_deref()))
-}
-
-/// 上一行的判据本体。拆开只为能测：进程环境变量是全局的，用例里改它会污染并发
-/// 跑别的用例（与 `codearts::keep_historical_reasoning_from` 同一取舍）。
-fn budget_axis_disabled_from(value: Option<&str>) -> bool {
-    matches!(
-        value.map(|raw| raw.trim().to_ascii_lowercase()).as_deref(),
-        Some("1") | Some("true") | Some("yes") | Some("on")
-    )
 }
 
 /// 这段 `content` 里有没有图片 part。
@@ -276,10 +236,8 @@ fn current_turn_start(messages: &[Value]) -> usize {
 /// 「动不动这份 body」—— 两侧共用一处判据是分叉唯一的防线：各写一遍的形态是
 /// "候选池里留着这家、发送时却没剥"，症状正是本层要避免的那次 400。
 ///
-/// ⚠️ **预算那一轴不在这里**。本函数回答的是「这叠图**能不能**剥」（结构性判据），
-/// 而预算回答的是「该不该为这一家剥」—— 后者是发送侧的事。若把预算塞进来，
-/// 一张小图 + 一家不吃图的家会变成"本层不该动手"，于是选路侧照旧把这家剔掉 ——
-/// 那正好把能力那一支的用处整块抹掉。
+/// 它是**结构性判据**：只回答「这叠图**能不能**剥」，不回答「该不该为这一家剥」
+/// （后者按目录读这家吃不吃图，在 `strip_reason_for` 里）。
 pub fn strip_applies(body: &Value) -> bool {
     if strip_disabled() {
         return false;
@@ -288,10 +246,6 @@ pub fn strip_applies(body: &Value) -> bool {
 }
 
 /// 「这一层该不该为**这一家**动手」+「为什么」。`None` = 一个字节都不动。
-///
-/// 两支的优先次序是固定的：**这家不吃图**先于**预算**。理由不是"更严重"，而是
-/// 留痕与占位文本要如实 —— 一家不吃图的家同时撞上预算时，真正解释这次剥图的是
-/// 它不吃图（预算那一支的措辞在那家是不准确的）。
 ///
 /// 参数按名字传进来而不是在函数里查目录：判据（本层该动手）与事实（这家不吃图）
 /// 是两件不同的事，捆在一个函数里就没法单独测。目录那侧的读法在
@@ -303,53 +257,7 @@ pub fn strip_reason_for(body: &Value, home_refuses_images: bool) -> Option<Strip
     if home_refuses_images {
         return Some(StripReason::HomeRefusesImages);
     }
-    if needs_budget_strip(body, budget_axis_disabled()) {
-        return Some(StripReason::HistoryImagesOverBudget);
-    }
     None
-}
-
-/// 预算那一轴的判据本体（把开关作为入参收进来，于是两种状态都能被用例钉住：
-/// 进程环境变量是全局的，用例里改它会污染并发跑的其它用例）。
-fn needs_budget_strip(body: &Value, axis_disabled: bool) -> bool {
-    !axis_disabled && history_image_bytes(body) > HISTORY_IMAGE_BUDGET_BYTES
-}
-
-/// 历史轮里的图片一共占多少**字节**。
-///
-/// 只累加 `image_url` 的 url 串长（base64 就在那里），**不序列化整份 body** ——
-/// 在这条路径上，序列化一遍十几 MB 的体就是为了拿一个数，代价是等量的拷贝与 GC。
-///
-/// 扫的范围与 [`strip_history_images`] 完全同源（本轮之内不算、`system` 里的算），
-/// 判据本体只有 `is_image_part` 与 `current_turn_start` 两处，这里不另立一套 ——
-/// 各写一遍的形态是"量出超预算却剥不掉"或反向的"剥了却没量到"，两种都静默。
-fn history_image_bytes(body: &Value) -> u64 {
-    fn sum(parts: &[Value]) -> u64 {
-        parts
-            .iter()
-            .filter(|part| is_image_part(part))
-            .map(|part| {
-                part.get("image_url")
-                    .and_then(|image| image.get("url"))
-                    .and_then(Value::as_str)
-                    .map(str::len)
-                    .unwrap_or(0) as u64
-            })
-            .sum()
-    }
-    let mut total = 0;
-    if let Some(messages) = body.get("messages").and_then(Value::as_array) {
-        // 本轮之内的消息不参与读数：它们本来就不在剥离范围内
-        for message in messages.iter().take(current_turn_start(messages)) {
-            if let Some(parts) = message.get("content").and_then(Value::as_array) {
-                total += sum(parts);
-            }
-        }
-    }
-    if let Some(parts) = system_parts(body) {
-        total += sum(parts);
-    }
-    total
 }
 
 /// `system` 那个字段的块数组形态（两种：直接是数组，或 `{content:[…]}`）。
@@ -485,14 +393,12 @@ mod strip_rules {
     use serde_json::{json, Value};
 
     use super::{
-        budget_axis_disabled_from, current_turn_needs_vision, history_image_bytes,
-        needs_budget_strip, request_carries_images, strip_applies, strip_history_images,
-        strip_reason_for, StripNotice, StripReason, HISTORY_IMAGE_BUDGET_BYTES,
-        MARKER_TEXT_BUDGET, MARKER_TEXT_REFUSES,
+        current_turn_needs_vision, request_carries_images, strip_applies, strip_history_images,
+        strip_reason_for, StripNotice, StripReason, MARKER_TEXT_REFUSES,
     };
 
-    /// 旧用例绝大多数走的是**能力那一支**（这家不吃图）：包一层，别在每个断言里
-    /// 重复理由。预算那一支另有专门用例。
+    /// 用例绝大多数走的是**能力那一支**（这家不吃图）：包一层，别在每个断言里
+    /// 重复理由。
     fn strip_refusing(body: &Value) -> Option<super::Stripped> {
         strip_history_images(body, StripReason::HomeRefusesImages)
     }
@@ -711,7 +617,7 @@ mod strip_rules {
         );
         assert!(
             strip_reason_for(&historical, false).is_none(),
-            "这家能吃图、这叠图也没超预算 ⇒ 一个字节都不动"
+            "这家能吃图 ⇒ 一个字节都不动（本层只服务不吃图的家）"
         );
         assert!(
             strip_reason_for(&current, true).is_none(),
@@ -724,140 +630,6 @@ mod strip_rules {
             )
             .is_none(),
             "没有图可言 ⇒ 不动手，也不该插占位文本"
-        );
-    }
-
-    // ── 预算那一轴（本次新增）──────────────────────────────────
-    //
-    // 一手读数（dev 3066，2026-10-15）：同一份 16,341,828 字节的会话里有 169 个
-    // 图片块，平均每块约 96 KB；而同一家实测能收下的最大体是 2,014,731 字节。
-    // 这个形状用一条 `history_image_bytes` 就能认出来，不必真的拼一个 16 MB 的体。
-
-    /// 造一张 url **恰好** `url_bytes` 字节的图（含 `data:` 前缀），形状与真请求一致。
-    ///
-    /// 判据数是 `image_url.url` 的串长，所以这里必须把前缀也算进去 —— 否则边界
-    /// 用例量的是"前缀 + 填充"而它自称量的是填充（第一次就是这么差 22 字节红的）。
-    fn sized_image(url_bytes: usize) -> Value {
-        const PREFIX: &str = "data:image/png;base64,";
-        let fill = url_bytes.saturating_sub(PREFIX.len());
-        json!({
-            "type": "image_url",
-            "image_url": {"url": format!("{PREFIX}{}", "A".repeat(fill))},
-        })
-    }
-
-    /// 历史图 + 当前轮纯文本：预算那一支唯一认得的形状。
-    fn historical_with_image_bytes(bytes: usize) -> Value {
-        json!({"messages": [
-            {"role": "user", "content": [sized_image(bytes)]},
-            {"role": "assistant", "content": "看到了"},
-            {"role": "user", "content": "只回一个字：好"},
-        ]})
-    }
-
-    #[test]
-    fn a_huge_screenshot_pile_is_stripped_even_though_the_home_accepts_images() {
-        // 能吃图 ≠ 该把二十几轮前的截图每一轮都重发一遍。
-        // 体量照实测那一份写：169 块 × 约 96 KB ≈ 15 MB，这里取预算的四倍。
-        let body = historical_with_image_bytes(HISTORY_IMAGE_BUDGET_BYTES as usize * 4);
-        assert_eq!(
-            Some(StripReason::HistoryImagesOverBudget),
-            strip_reason_for(&body, false),
-            "这家**能**吃图，但这叠历史图已经越过预算 ⇒ 仍要剥"
-        );
-        let stripped = strip_history_images(&body, StripReason::HistoryImagesOverBudget)
-            .expect("超预算这一类必须剥得动");
-        assert_eq!(1, stripped.removed);
-        assert!(
-            !request_carries_images(&stripped.body),
-            "剥完了这一家就不该再收到图"
-        );
-    }
-
-    /// 反面对照：没超预算就不许动。
-    ///
-    /// 少了这一条，判据写成「有历史图就剥」也会全绿 —— 那等于把能识图的家降级成
-    /// 不能识图的家，用户的截图从此再也进不了上下文。
-    #[test]
-    fn a_history_under_budget_is_left_alone() {
-        let body = historical_with_image_bytes(HISTORY_IMAGE_BUDGET_BYTES as usize / 4);
-        assert!(
-            strip_reason_for(&body, false).is_none(),
-            "没超预算 + 这家能吃图 ⇒ 一个字节都不动"
-        );
-        assert!(strip_history_images(&body, StripReason::HomeRefusesImages).is_some(), "（同一份体在不吃图的家仍该剥：能力那一支与预算那一支互不影响）");
-    }
-
-    /// 边界：正好等于预算是"没过"（与 `>` 而不是 `>=` 同口径）。
-    #[test]
-    fn the_budget_boundary_is_strictly_greater_than() {
-        let exact = historical_with_image_bytes(HISTORY_IMAGE_BUDGET_BYTES as usize);
-        let over = historical_with_image_bytes(HISTORY_IMAGE_BUDGET_BYTES as usize + 1);
-        assert_eq!(HISTORY_IMAGE_BUDGET_BYTES, history_image_bytes(&exact), "读数就是 url 串长之和");
-        assert!(!needs_budget_strip(&exact, false), "正好等于预算 ⇒ 不剥");
-        assert!(needs_budget_strip(&over, false), "多一个字节 ⇒ 剥");
-    }
-
-    /// 开关只关预算那一轴：能力那一轴一格都不许被它影响。
-    #[test]
-    fn the_budget_switch_turns_only_that_axis_off() {
-        assert!(budget_axis_disabled_from(Some("1")));
-        assert!(budget_axis_disabled_from(Some(" on ")));
-        assert!(budget_axis_disabled_from(Some("YES")));
-        assert!(!budget_axis_disabled_from(None), "缺省是开着（默认剥）");
-        assert!(!budget_axis_disabled_from(Some("0")));
-
-        let over = historical_with_image_bytes(HISTORY_IMAGE_BUDGET_BYTES as usize + 1);
-        assert!(needs_budget_strip(&over, false), "开着 ⇒ 超预算要剥");
-        assert!(!needs_budget_strip(&over, true), "关掉 ⇒ 这一轴不动手");
-        assert_eq!(
-            Some(StripReason::HomeRefusesImages),
-            strip_reason_for(&over, true),
-            "关掉预算那一轴之后，不吃图的家照旧要剥"
-        );
-    }
-
-    /// 两支的**模型可见文本**必须不同。
-    ///
-    /// 预算那一支上这家明明能吃图，写"该上游不接受图像输入"是假话，而模型据此
-    /// 给用户"换个能看图的供应商"这类错建议就是这么来的。明细里的留痕同理。
-    #[test]
-    fn the_two_reasons_leave_different_words() {
-        assert_ne!(MARKER_TEXT_REFUSES, MARKER_TEXT_BUDGET);
-        let refuses = StripNotice {
-            removed: 3,
-            reason: StripReason::HomeRefusesImages,
-        };
-        let budget = StripNotice {
-            removed: 3,
-            reason: StripReason::HistoryImagesOverBudget,
-        };
-        assert!(refuses.describe().contains("不接受图像输入"));
-        assert!(budget.describe().contains("预算"));
-        assert_ne!(refuses.describe(), budget.describe());
-        // 占位文本真的落进 body 的是哪一句：这一条把上面那个枚举与剥出来的字节扣在一起
-        let body = historical_with_image_bytes(HISTORY_IMAGE_BUDGET_BYTES as usize + 1);
-        let stripped =
-            strip_history_images(&body, StripReason::HistoryImagesOverBudget).expect("剥得动");
-        assert_eq!(
-            MARKER_TEXT_BUDGET,
-            stripped.body["messages"][0]["content"][0]["text"],
-            "预算那一支留下的必须是预算那句占位"
-        );
-    }
-
-    /// 预算再大也不许碰**当前这一轮**：这一问就靠那张图。
-    #[test]
-    fn the_budget_axis_never_touches_the_current_turn() {
-        let body = json!({"messages": [
-            {"role": "user", "content": [sized_image(HISTORY_IMAGE_BUDGET_BYTES as usize * 2)]},
-        ]});
-        assert!(history_image_bytes(&body) == 0, "本轮之内的图不进读数");
-        assert!(!strip_applies(&body), "含图 ⇒ 本层整层不动");
-        assert!(strip_reason_for(&body, false).is_none());
-        assert!(
-            strip_reason_for(&body, true).is_none(),
-            "不吃图的家也一样：这一问就依赖那张图，剥了必然答错"
         );
     }
 

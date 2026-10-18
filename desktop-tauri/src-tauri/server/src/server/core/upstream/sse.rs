@@ -233,6 +233,8 @@ pub struct ReasoningCoalescer {
     /// 丢弃保活换行分片（见模块头与 [`is_newline_keepalive`]）。
     /// false = 帧的字节与接入前逐字一致。
     strip_newline_chunks: bool,
+    /// 全程是否见过**非 null 的 `finish_reason`**（见 [`Self::synthetic_finish_frame`]）。
+    finish_seen: bool,
 }
 
 impl Default for ReasoningCoalescer {
@@ -250,6 +252,7 @@ impl ReasoningCoalescer {
             telemetry: None,
             rewrite: None,
             strip_newline_chunks: false,
+            finish_seen: false,
         }
     }
 
@@ -301,6 +304,36 @@ impl ReasoningCoalescer {
         out
     }
 
+    /// 合成一帧「这一轮结束了」（只在 `[DONE]` 前、且全程没见过非 null
+    /// `finish_reason` 时用，见 `handle_line` 里那段说明）。
+    ///
+    /// 形状与 [`Self::coalesced_frame`] 同源：`Value::Object` 按键排序
+    /// （`choices` / `created` / `id` / `model` / `object`），拿不到的元数据
+    /// **省掉字段**而不是填 0/空串 —— 客户端读的是 `choices[0].finish_reason`，
+    /// 其余字段只是配平，编不出来就别编。
+    fn synthetic_finish_frame(&self) -> Option<Frame> {
+        let mut chunk = serde_json::Map::new();
+        chunk.insert(
+            "choices".to_string(),
+            serde_json::json!([{ "delta": {}, "finish_reason": "stop", "index": 0 }]),
+        );
+        if let Some(created) = self.meta.created.clone().filter(|value| is_truthy(value)) {
+            chunk.insert("created".to_string(), created);
+        }
+        if let Some(id) = self.meta.id.clone().filter(|value| is_truthy(value)) {
+            chunk.insert("id".to_string(), id);
+        }
+        if let Some(model) = self.meta.model.clone().filter(|value| is_truthy(value)) {
+            chunk.insert("model".to_string(), model);
+        }
+        chunk.insert(
+            "object".to_string(),
+            Value::String("chat.completion.chunk".to_string()),
+        );
+        let text = serde_json::to_string(&Value::Object(chunk)).ok()?;
+        Some(Bytes::from(format!("data: {text}\n\n")))
+    }
+
     /// 处理一行（已去掉行尾的 `\r`）
     fn handle_line(&mut self, raw: &str, out: &mut Vec<Frame>) {
         let line = raw.strip_suffix('\r').unwrap_or(raw);
@@ -316,6 +349,34 @@ impl ReasoningCoalescer {
             if !self.acc.is_empty() {
                 out.push(self.coalesced_frame());
                 self.acc.clear();
+            }
+            // ── 补收尾帧（2026-10-18）──────────────────────────────
+            // 上游以 `[DONE]` 收尾、**全程却没给过非 null 的 `finish_reason`** 时，
+            // 在 `[DONE]` 之前补一帧 `finish_reason:"stop"`。
+            //
+            // 为什么必须补：`finish_reason` 是「这一轮结束了」的协议契约。以它为准的
+            // 客户端（Qoder 是实测过的那一类）拿不到 stop ⇒ 判 `incomplete_stream`、
+            // 判 replay-unsafe、**一条不重试直接终止会话** —— 用户看到的是「网关把
+            // 客户端停掉了」。10 月 OfficeAce 那次（收尾帧被保活/累积逻辑整帧吞掉）
+            // 与这次 AtomCode 的配额拒绝是同一个症状的两个成因：不同的是我们会把
+            // 缺帧补齐，而**上游少发一帧我们照转发**。
+            //
+            // 实测形态（2026-10-18，AtomCode 配额耗尽，客户端侧抓到 426 字节）：
+            //   data: {"choices":[{"index":0,"delta":{"role":"assistant","content":"…"}}]}
+            //   data: [DONE]
+            // —— 只有一条内容帧，`finish_reason` **键都不存在**，也没有 usage。
+            //
+            // 边界（刻意收窄，宁可不补也不乱补）：
+            //   · 只在**看到本协议收尾帧**（`[DONE]`）时补 —— 上游已经宣告自己说完了；
+            //   · 上游一股脑 EOF、连 `[DONE]` 都没发（`request_stats` 里那批
+            //     「200 + 零 token + 无错误」）**不补**：那可能是真被截断，
+            //     补上等于把截断洗成正常收尾；
+            //   · 见过 `finish_reason`（含 `length` / `tool_calls`）一律不补 ——
+            //     上游说了为什么停，我们不改它的结论。
+            if !self.finish_seen {
+                if let Some(frame) = self.synthetic_finish_frame() {
+                    out.push(frame);
+                }
             }
             out.push(Bytes::from_static(b"data: [DONE]\n\n"));
             return;
@@ -347,6 +408,19 @@ impl ReasoningCoalescer {
             }
             if let Some(created) = chunk.get("created").filter(|value| is_truthy(value)) {
                 self.meta.created = Some(created.clone());
+            }
+            // ── 「见过收尾」标记（供 `[DONE]` 前补帧用）──────────────────
+            // 位置与上面三处元数据提取并列：**只读不写**，不参与下面 `out` 的构造，
+            // 所以对这一帧的下发字节零影响。
+            if !self.finish_seen
+                && chunk
+                    .get("choices")
+                    .and_then(Value::as_array)
+                    .and_then(|choices| choices.first())
+                    .and_then(|choice| choice.get("finish_reason"))
+                    .is_some_and(is_truthy)
+            {
+                self.finish_seen = true;
             }
         }
         // ── 保活换行分片的丢弃（见模块头与 `is_newline_keepalive`）──────
@@ -689,6 +763,73 @@ mod tests {
         };
         assert_eq!(content_of(&dropped), "A real finding:\n");
         assert_eq!(content_of(&stream), "A\n real\n finding\n:\n");
+    }
+
+    /// 上游以 `[DONE]` 收尾、全程没给非 null `finish_reason` ⇒ 必须在 `[DONE]`
+    /// **之前**补一帧 `finish_reason:"stop"`。
+    ///
+    /// 形状取自 2026-10-18 的实测（AtomCode 配额耗尽，客户端侧抓到 426 字节）：
+    /// 一条内容帧 + `data: [DONE]`，`finish_reason` **键都不存在**。没有这一帧，
+    /// 以它为「这一轮结束」契约的客户端会判 `incomplete_stream` 并终止会话。
+    #[test]
+    fn done_without_finish_reason_gets_a_synthetic_stop_frame() {
+        const CONTENT: &str = r#"data: {"id":"85634b31","model":"glm5.3-flash","created":1792314824,"object":"chat.completion.chunk","choices":[{"index":0,"delta":{"role":"assistant","content":"模型「glm5.3-flash」在当前 CodingPlan 用量窗口内已达上限。"}}]}"#;
+        let stream = format!("{CONTENT}\n\ndata: [DONE]\n\n");
+        let out = feed(&mut coalescer(false), &stream);
+
+        // 补帧存在，且在 [DONE] 之前
+        let synth = out
+            .find("\"finish_reason\":\"stop\"")
+            .unwrap_or_else(|| panic!("缺收尾帧时必须补一个 stop：{out}"));
+        let done = out
+            .find("data: [DONE]")
+            .unwrap_or_else(|| panic!("[DONE] 必须还在：{out}"));
+        assert!(synth < done, "补帧必须排在 [DONE] 之前：{out}");
+
+        // 上游那一帧逐字保留（本功能只增不改）
+        assert!(out.contains(CONTENT), "上游帧必须逐字节原样：{out}");
+        // [DONE] 只出现一次（补帧不是另一个终止标记）
+        assert_eq!(1, out.matches("data: [DONE]").count(), "终止标记不该重复：{out}");
+        // 元数据从上游帧继承（客户端靠 id/model 归并这一轮）
+        let synth_line = out
+            .split("\n\n")
+            .find(|frame| frame.contains("\"finish_reason\":\"stop\""))
+            .unwrap_or_default();
+        assert!(synth_line.contains("\"id\":\"85634b31\""), "补帧要带上游的 id：{synth_line}");
+        assert!(synth_line.contains("\"model\":\"glm5.3-flash\""), "补帧要带上游的 model：{synth_line}");
+    }
+
+    /// 正对照：上游自己给了 `finish_reason` ⇒ 一个字节都不许加。
+    /// 少了这条，「补帧」可能变成「无条件多塞一帧 stop」，把 `length`/`tool_calls`
+    /// 的结论也覆盖掉。
+    #[test]
+    fn a_real_finish_reason_is_never_duplicated() {
+        const CONTENT: &str = r#"data: {"id":"x1","model":"m","created":1,"object":"chat.completion.chunk","choices":[{"index":0,"delta":{"content":"hi"},"finish_reason":null}]}"#;
+        const FINISH: &str = r#"data: {"id":"x1","model":"m","created":1,"object":"chat.completion.chunk","choices":[{"index":0,"delta":{},"finish_reason":"length"}]}"#;
+        let stream = format!("{CONTENT}\n\n{FINISH}\n\ndata: [DONE]\n\n");
+        let out = feed(&mut coalescer(false), &stream);
+        assert_eq!(
+            1,
+            out.matches("\"finish_reason\":\"length\"").count(),
+            "上游给过的收尾原因只能出现一次：{out}"
+        );
+        assert!(
+            !out.contains("\"finish_reason\":\"stop\""),
+            "上游说了 length，我们不许替他改成 stop：{out}"
+        );
+    }
+
+    /// 反面对照：**没有** `[DONE]`（上游直接 EOF）时**不补** —— 那可能是真被截断，
+    /// 补上等于把截断洗成正常收尾（见 `handle_line` 里那段边界说明）。
+    #[test]
+    fn eof_without_a_terminal_marker_is_not_patched() {
+        const CONTENT: &str = r#"data: {"id":"x1","model":"m","created":1,"object":"chat.completion.chunk","choices":[{"index":0,"delta":{"content":"half"},"finish_reason":null}]}"#;
+        let stream = format!("{CONTENT}\n\n");
+        let out = feed(&mut coalescer(false), &stream);
+        assert!(
+            !out.contains("\"finish_reason\":\"stop\""),
+            "没有收尾帧就不能补：{out}"
+        );
     }
 
     #[test]

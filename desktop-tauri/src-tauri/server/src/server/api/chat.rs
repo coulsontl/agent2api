@@ -460,13 +460,15 @@ pub async fn count_tokens(State(state): State<ServerState>, body: Bytes) -> Resp
         return error.payload_response();
     };
     // 复用 Anthropic → Chat 的转换来统计：这样「工具定义 / 图片块 / system」
-    // 的文本都被算进去，口径与真正转发时一致（转换失败则按原始 JSON 估）
-    let text = match crate::server::core::protocol::anthropic::chat_from_anthropic(&payload) {
-        Ok(chat) => serde_json::to_string(&chat).unwrap_or_default(),
-        Err(_) => serde_json::to_string(&payload).unwrap_or_default(),
+    // 的文本都被算进去，口径与真正转发时一致（转换失败则按原始 JSON 估）。
+    // 估算函数与流式 `message_start` 共用同一份（`protocol::anthropic::
+    // estimate_prompt_tokens`）——同一份请求在两个地方给两个数字只会让人
+    // 怀疑哪个都不准。
+    let body = match crate::server::core::protocol::anthropic::chat_from_anthropic(&payload) {
+        Ok(chat) => chat,
+        Err(_) => payload,
     };
-    let characters = text.chars().count();
-    let tokens = ((characters as f64) / 3.5).ceil().max(1.0) as i64;
+    let tokens = crate::server::core::protocol::anthropic::estimate_prompt_tokens(&body);
     let _ = state;
     json_response(json!({
         "input_tokens": tokens,

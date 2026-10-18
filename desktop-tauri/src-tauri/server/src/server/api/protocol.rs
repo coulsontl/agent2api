@@ -412,6 +412,10 @@ pub async fn messages_endpoint(
         telemetry_id.clone(),
         started_at,
     ));
+    // 请求侧 prompt 估算：转发会消耗掉 `chat_body`，先算好带给流状态机。
+    // `message_start` 在真实 usage 到达前就要发出，而 Claude Code 只从那一帧
+    // 读 `input_tokens` —— 不给估算，客户端整段上下文会被记成 0。
+    let prompt_estimate = anthropic::estimate_prompt_tokens(&chat_body);
     // 手动终止的取消令牌 + 断线兜底守卫（与 /v1/chat/completions 同一处时点
     // 与同一套语义：登记后详情页可终止这条请求；handler 被 axum 取消时
     // 由守卫的 Drop 补 408 终态。三条出口见下面的 complete / handoff）
@@ -455,7 +459,8 @@ pub async fn messages_endpoint(
             let model = requested_model.clone();
             let context = RecordContext { status: i64::from(status.as_u16()), ..context };
             if stream {
-                let mut machine = anthropic::AnthropicStream::new(&model);
+                let mut machine =
+                    anthropic::AnthropicStream::new(&model).with_prompt_estimate(prompt_estimate);
                 let transformed = pipeline::transformed_stream(
                     source,
                     context,

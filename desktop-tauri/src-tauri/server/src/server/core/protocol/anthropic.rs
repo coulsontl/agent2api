@@ -675,10 +675,22 @@ pub(super) fn parse_json_object(value: &Value) -> Value {
     }
 }
 
+/// 请求侧 prompt 大小的粗略估算（token），只用于 `message_start`。
+///
+/// 口径与 `/v1/messages/count_tokens` **逐字相同**（字符数 ÷ 3.5）：同一个网关
+/// 对同一份请求给两个不同的估算值，只会让人怀疑哪个都不准。
+/// 参数是**已翻译成 chat 形状的请求体**（`chat_from_anthropic` 的产物），
+/// 这样工具定义、图片块、system 都被算进来，与真正发出去的内容一致。
+pub fn estimate_prompt_tokens(chat_body: &Value) -> i64 {
+    let text = chat_body.to_string();
+    ((text.chars().count() as f64) / 3.5).ceil().max(1.0) as i64
+}
+
 /// Chat 的 usage → Anthropic 的 usage
 pub fn usage_to_anthropic(usage: Option<&Value>) -> Value {
     let Some(usage) = usage.filter(|value| value.is_object()) else {
-        return json!({ "input_tokens": 0, "output_tokens": 0 });
+        // 三项齐全（而不是省掉缓存字段）：形状统一，客户端不必按字段有无分支
+        return json!({ "input_tokens": 0, "output_tokens": 0, "cache_read_input_tokens": 0 });
     };
     let number = |key: &str| -> i64 {
         usage.get(key).and_then(Value::as_i64).unwrap_or(0)
@@ -726,7 +738,10 @@ pub struct AnthropicStream {
     has_tool: bool,
     stop_reason: Option<String>,
     usage: Option<Value>,
-    input_tokens: i64,
+    /// 请求侧估算的 prompt 大小（见 [`estimate_prompt_tokens`]）。
+    /// 只用于 `message_start` —— 那时上游 usage 还没到，客户端却**只认这一帧**
+    /// 的 `input_tokens` 来记上下文用量（Claude Code 即如此）。
+    prompt_estimate: i64,
 }
 
 impl AnthropicStream {
@@ -748,8 +763,16 @@ impl AnthropicStream {
             has_tool: false,
             stop_reason: None,
             usage: None,
-            input_tokens: 0,
+            prompt_estimate: 0,
         }
+    }
+
+    /// 带上请求侧的 prompt 估算：`message_start` 在真实 usage 到达之前就要
+    /// 发出去，而下游（尤其 Claude Code）只从那一帧读 `input_tokens`。
+    /// 不从真实 usage 反推 —— 流尾的真实值仍由 `message_delta` 原样给出。
+    pub fn with_prompt_estimate(mut self, prompt_estimate: i64) -> Self {
+        self.prompt_estimate = prompt_estimate.max(0);
+        self
     }
 
     pub fn push(&mut self, chunk: &[u8]) -> Vec<bytes::Bytes> {
@@ -789,23 +812,25 @@ impl AnthropicStream {
             .stop_reason
             .clone()
             .unwrap_or_else(|| if self.has_tool { "tool_use".to_string() } else { "end_turn".to_string() });
+        // 收尾帧把**全部三项**都给出去，不只 `output_tokens`：
+        //   - 官方 Anthropic 的 `message_delta` 确实只带 `output_tokens`，
+        //     但那是因为官方在 `message_start` 就已经报了真实 `input_tokens`；
+        //   - 本网关的上游是 OpenAI 风格，usage 在**流尾**才到。`message_start`
+        //     只能给请求侧估算（见 `with_prompt_estimate`），而估算无从知道
+        //     缓存命中，也必然与真实 prompt 有偏差。真实值只有这一帧能给。
+        //     2026-10-18 实测：直连 `/v1/messages` 的 `message_delta` 曾只回
+        //     `{"output_tokens":11}`，input 与缓存双双缺失。
+        // 字段形状与 `usage_to_anthropic` 逐字一致（同一套口径，含
+        // 「input 不含缓存命中」那条减法），多给字段对只认 output 的客户端无害。
         out.push(self.event(
             "message_delta",
             json!({
                 "delta": { "stop_reason": stop_reason, "stop_sequence": Value::Null },
-                "usage": { "output_tokens": self.output_tokens() },
+                "usage": usage_to_anthropic(self.usage.as_ref()),
             }),
         ));
         out.push(self.event("message_stop", json!({})));
         out
-    }
-
-    fn output_tokens(&self) -> i64 {
-        self.usage
-            .as_ref()
-            .and_then(|usage| usage.get("completion_tokens"))
-            .and_then(Value::as_i64)
-            .unwrap_or(0)
     }
 
     fn consume(&mut self, chunk: &Value) -> Vec<bytes::Bytes> {
@@ -833,8 +858,6 @@ impl AnthropicStream {
             }
         }
         if let Some(usage) = chunk.get("usage").filter(|value| value.is_object()) {
-            // Anthropic 的 message_delta 只报 output_tokens，input 在 message_start
-            self.input_tokens = usage.get("prompt_tokens").and_then(Value::as_i64).unwrap_or(0);
             self.usage = Some(usage.clone());
         }
         let choice = chunk.pointer("/choices/0");
@@ -1011,6 +1034,17 @@ impl AnthropicStream {
             return Vec::new();
         }
         self.started = true;
+        // `usage` 在 OpenAI 风格的流尾才到，这一帧发出去时通常还是 `None`。
+        // 优先用真实值（少数上游首个 chunk 就带），否则退回请求侧估算 ——
+        // `input_tokens` 给 0 不是「如实」，是让客户端把整段上下文记成 0。
+        let mut usage = usage_to_anthropic(self.usage.as_ref());
+        if let Some(map) = usage.as_object_mut() {
+            if self.usage.is_none() && self.prompt_estimate > 0 {
+                map.insert("input_tokens".to_string(), json!(self.prompt_estimate));
+            }
+            // 生成还没开始，输出恒为 0
+            map.insert("output_tokens".to_string(), json!(0));
+        }
         vec![self.event(
             "message_start",
             json!({
@@ -1022,7 +1056,7 @@ impl AnthropicStream {
                     "content": [],
                     "stop_reason": Value::Null,
                     "stop_sequence": Value::Null,
-                    "usage": { "input_tokens": self.input_tokens, "output_tokens": 0 },
+                    "usage": usage,
                 },
             }),
         )]
@@ -1205,5 +1239,129 @@ pub fn responses_error_code(status: u16) -> &'static str {
         429 => "rate_limit_error",
         500..=599 => "server_error",
         _ => "api_error",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{AnthropicStream, Value};
+
+    /// 从 SSE 帧里挑出指定事件名的 `data` 负载
+    fn payloads(frames: &[bytes::Bytes], event: &str) -> Vec<Value> {
+        let prefix = format!("event: {event}\n");
+        frames
+            .iter()
+            .map(|frame| String::from_utf8_lossy(frame).into_owned())
+            .filter(|frame| frame.starts_with(&prefix))
+            .filter_map(|frame| {
+                frame
+                    .lines()
+                    .find_map(|line| line.strip_prefix("data: ").map(str::to_string))
+            })
+            .filter_map(|data| serde_json::from_str::<Value>(&data).ok())
+            .collect()
+    }
+
+    /// 回归（2026-10-18）：`message_delta` 曾只带 `output_tokens`。
+    ///
+    /// 上游是 OpenAI 风格，usage 在流尾才到，`message_start` 发出去时还不能报
+    /// `input_tokens`；收尾帧是客户端拿到 prompt / 缓存计数的**唯一**机会。
+    /// 漏报的实测后果：Claude Code 会话统计里输入输出恒为 1（它只认
+    /// `message_start` 的 input 与 `message_delta` 的 output），gateway 侧日志
+    /// 却显示真实的大数字。
+    #[test]
+    fn message_delta_carries_input_and_cache_usage_not_only_output() {
+        let mut stream = AnthropicStream::new("glm-5.3");
+        let mut frames = stream.push(
+            b"data: {\"id\":\"chatcmpl-1\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"hi\"}}]}\n\n",
+        );
+        frames.extend(stream.push(
+            b"data: {\"id\":\"chatcmpl-1\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":1200,\"completion_tokens\":11,\"prompt_tokens_details\":{\"cached_tokens\":800}}}\n\n",
+        ));
+        frames.extend(stream.finish());
+
+        let delta = payloads(&frames, "message_delta");
+        assert_eq!(delta.len(), 1, "应当恰好一帧 message_delta");
+        // Anthropic 的 input_tokens 不含缓存命中：1200 - 800
+        assert_eq!(delta[0]["usage"]["input_tokens"], 400);
+        assert_eq!(delta[0]["usage"]["output_tokens"], 11);
+        assert_eq!(delta[0]["usage"]["cache_read_input_tokens"], 800);
+        assert_eq!(delta[0]["delta"]["stop_reason"], "end_turn");
+    }
+
+    /// 对应的第一帧契约：`message_start` 时 usage 还没到，如实报 0，
+    /// 而不是编一个 1（旧实现与 AxonHub 的 `{1,1}` 占位正是这么来的）。
+    #[test]
+    fn message_start_reports_zero_before_usage_arrives() {
+        let mut stream = AnthropicStream::new("glm-5.3");
+        let mut frames = stream.push(
+            b"data: {\"id\":\"chatcmpl-1\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"hi\"}}]}\n\n",
+        );
+        frames.extend(stream.finish());
+
+        let start = payloads(&frames, "message_start");
+        assert_eq!(start.len(), 1);
+        assert_eq!(start[0]["message"]["usage"]["input_tokens"], 0);
+        assert_eq!(start[0]["message"]["usage"]["output_tokens"], 0);
+        assert!(
+            start[0]["message"]["usage"].get("cache_read_input_tokens").is_some(),
+            "字段形状应与收尾帧一致"
+        );
+    }
+
+    /// 带估算时，`message_start` 不该报 0 —— 客户端（Claude Code）只认这一帧。
+    #[test]
+    fn message_start_uses_the_request_estimate_when_no_usage_arrived() {
+        let mut stream = AnthropicStream::new("glm-5.3").with_prompt_estimate(1234);
+        let mut frames = stream.push(
+            b"data: {\"id\":\"chatcmpl-1\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"hi\"}}]}\n\n",
+        );
+        frames.extend(stream.finish());
+
+        let start = payloads(&frames, "message_start");
+        assert_eq!(start[0]["message"]["usage"]["input_tokens"], 1234);
+        assert_eq!(start[0]["message"]["usage"]["output_tokens"], 0);
+        // 收尾帧仍是上游真实值，不被估算污染
+        let delta = payloads(&frames, "message_delta");
+        assert_eq!(delta[0]["usage"]["input_tokens"], 0);
+    }
+
+    /// 真实 usage 先到（少数上游首帧就带）：估算让位，不覆盖真实值。
+    #[test]
+    fn real_usage_wins_over_the_request_estimate() {
+        let mut stream = AnthropicStream::new("glm-5.3").with_prompt_estimate(9999);
+        let mut frames = stream.push(
+            b"data: {\"id\":\"chatcmpl-1\",\"choices\":[{\"index\":0,\"delta\":{}}],\"usage\":{\"prompt_tokens\":42}}\n\n",
+        );
+        frames.extend(stream.finish());
+
+        let start = payloads(&frames, "message_start");
+        assert_eq!(start[0]["message"]["usage"]["input_tokens"], 42);
+    }
+
+    /// 估算口径与 `/v1/messages/count_tokens` 相同：字符数 ÷ 3.5，至少 1。
+    #[test]
+    fn prompt_estimate_matches_the_count_tokens_rule() {
+        // `null` 序列化成 4 个字符 → 4 / 3.5 = 1.14 → 2
+        assert_eq!(super::estimate_prompt_tokens(&Value::Null), 2);
+        let body = Value::String("a".repeat(140));
+        // 序列化后带引号 = 142 字符 → 142 / 3.5 = 40.57 → 41
+        assert_eq!(super::estimate_prompt_tokens(&body), 41);
+    }
+
+    /// 上游首帧就带 usage 时，别把它丢掉：能报就报。
+    #[test]
+    fn message_start_reports_usage_when_the_first_chunk_already_has_it() {
+        let mut stream = AnthropicStream::new("glm-5.3");
+        let mut frames = stream.push(
+            b"data: {\"id\":\"chatcmpl-1\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"hi\"}}],\"usage\":{\"prompt_tokens\":42,\"completion_tokens\":0}}\n\n",
+        );
+        frames.extend(stream.finish());
+
+        let start = payloads(&frames, "message_start");
+        assert_eq!(start.len(), 1);
+        assert_eq!(start[0]["message"]["usage"]["input_tokens"], 42);
+        // 生成还没开始，输出恒为 0
+        assert_eq!(start[0]["message"]["usage"]["output_tokens"], 0);
     }
 }

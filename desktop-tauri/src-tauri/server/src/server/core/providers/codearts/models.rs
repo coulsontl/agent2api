@@ -859,6 +859,9 @@ pub(crate) fn tests_sample_model() -> ModelConfig {
         supports_images: None,
         source: ModelSource::Benefit,
         credit_display: String::new(),
+        // v3.1.0 给本结构新增的「可见性」位：样例条目如实留 `None`（= 上游没给
+        // 这个字段），与本支用例要的形态一致
+        display_enabled: None,
     }
 }
 

@@ -2640,9 +2640,20 @@ async fn send_with_retry(
         );
         // 文案由适配器给出（含 provider 提示），编排层原样组装成网关错误
         let error = match &class {
-            UpstreamErrorClass::QuotaLimited { status, message, upstream_code, .. } => {
-                GatewayError::with_status(*status as i32, message.clone())
-                    .with_optional_code(*upstream_code)
+            UpstreamErrorClass::QuotaLimited { message, upstream_code, reset_at, .. } => {
+                // 终态的限额错误统一按 **429** 出：上游常把这个语义发成 403
+                // （CodeArts 福利日池就是 403 + InferHub.4291.200），而 403 在
+                // 客户端眼里是「权限问题」，不会退避重试；`is_quota_limit()` 也只认
+                // 429 / 上游码 6004 —— 用上游原码会让响应体里那对
+                // `reset_at` / `reset_at_text` 整个不出现（同一口径见
+                // `rotate::quota_backoff_error` 与 `quota_refusal_error`）。
+                // 上游原文照留在 message 里，不改写它的措辞、也不编恢复时刻。
+                let mut error = GatewayError::with_status(429, message.clone())
+                    .with_optional_code(*upstream_code);
+                if let Some(at) = reset_at.filter(|at| *at > logging::now_ms()) {
+                    error = error.with_retry_after_seconds(((at - logging::now_ms()) / 1000) as u64);
+                }
+                error
             }
             // 内容拦截与 Fatal 的客户端形态相同（状态码 + 上游原文 + 上游码）：
             // 区别只在**编排动作**（前者不罚账号、先换提示词补救），不在文案。

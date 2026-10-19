@@ -287,6 +287,28 @@ pub(super) async fn select_target_account(
             }
         }
     }
+    // ── 一个冷却窗口只替客户端探一发（第二级兜底的节流）──────────────
+    // 上面那句「挑恢复最早的试一次」是**刻意**的：上游可能已经提前解除限额，
+    // 探一发就能直接成功。但它没有频率上限，会被并发放大 —— 生产实测
+    // （NAS dev 3066，2026-10-18 18:10:48–18:11:27）同一个「账号 × 模型 × 冷却窗口」
+    // 在 40 秒里被这样白烧 **14 发**，每一发都拿回同一句上游 403；那 14 行的
+    // 选路快照里 `ordered` 是空的、三家 codearts 全在冷却 —— 也就是说**没有任何
+    // 一次探测带来新信息**，只有上游往返。
+    // 所以：同一窗口内只放行第一发，其余直接报 429 + `Retry-After`（恢复时刻本来就
+    // 写在冷却记录里，是已知的）。第二级的探测语义与「恢复时刻」都不改，只是不再重复。
+    //
+    // 两道豁免：① 钉账号（面板「测试」那条）不节流 —— 提请求的人就是要看一眼真实结果；
+    //          ② `best_reset` 无限大 ⇒ 这一级是被**并发**挤占而不是被限额挡住的，
+    //             并发即刻自愈、每发都可能成，节流它就是把请求挡在门外。
+    if let (Some(account), true, None) = (&best_effort, best_reset.is_finite(), pinned) {
+        let window_end = best_reset as i64;
+        let id = routing::account_id(account).unwrap_or_default();
+        let provider = account.get("provider").and_then(Value::as_str).unwrap_or_default();
+        let key = format!("{provider}|{id}|{}|{window_end}", keys.request_model());
+        if cooldown_window_already_probed(&key, now) {
+            return Err(probed_window_error(window_end, now));
+        }
+    }
     if let Some(account) = best_effort {
         if let Some(id) = routing::account_id(&account).map(str::to_string) {
             if let Some(entry) = service.store.get_session_by_id(&id) {
@@ -309,6 +331,63 @@ pub(super) async fn select_target_account(
         proxy_notice: None,
         decision: Some(decision),
     })
+}
+
+/// 「这个冷却窗口已经替客户端探过一发」的账（进程内，不落库、重启即清）。
+///
+/// 键由调用方拼成 `家|账号|模型|恢复时刻` —— **最后一段就是窗口恢复时刻** ⇒ 上游把冷却
+/// 往后推、或账号恢复后再次被限额，都是一个新键，天然不需要 TTL；插入前顺手丢掉
+/// 已过期项，避免长期只增。
+static COOLDOWN_PROBES: std::sync::OnceLock<std::sync::Mutex<std::collections::HashSet<String>>> =
+    std::sync::OnceLock::new();
+
+/// 本窗口是否**已经**探过。首次调用登记并回 `false`（放行那一发），之后回 `true`。
+fn cooldown_window_already_probed(key: &str, now: i64) -> bool {
+    let ledger = COOLDOWN_PROBES.get_or_init(|| std::sync::Mutex::new(Default::default()));
+    let mut guard = ledger.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    if guard.contains(key) {
+        return true;
+    }
+    guard.insert(key.to_string());
+    if guard.len() > 256 {
+        guard.retain(|saved| {
+            saved
+                .rsplit('|')
+                .next()
+                .and_then(|tail| tail.parse::<i64>().ok())
+                .is_some_and(|end| end > now)
+        });
+    }
+    false
+}
+
+/// 冷却窗口内不再重复探测时，回给客户端的那条错误。
+///
+/// 状态码取 **429**（不是上游那句 403）：语义是「账号级额度到点了，等一会儿再来」，
+/// 而 `is_quota_limit()` 只认 429 / 上游码 6004 —— 用上游原码会让响应体里
+/// 那对 `reset_at` / `reset_at_text` 不出现（与已并上游的配额拒绝那条同一口径：
+/// 客户端要知道**睡到什么时候**，而不是只知道"配额"两个字）。
+/// `Retry-After` 只在算得出**未来**时刻时给（0/过期都不给，编一个时长比不给更坏）。
+pub(super) fn quota_backoff_error(message: String, window_end: i64, now: i64) -> GatewayError {
+    let seconds = (window_end - now) / 1000;
+    let error = GatewayError::with_status(429, message);
+    if seconds > 0 {
+        error.with_retry_after_seconds(seconds as u64)
+    } else {
+        error
+    }
+}
+
+/// 选路侧「本窗口已探过」那句话的文案（恢复时刻写进句子，`Retry-After` 由上面那个函数挂）。
+pub(super) fn probed_window_error(window_end: i64, now: i64) -> GatewayError {
+    quota_backoff_error(
+        format!(
+            "该模型的可用账号都在限额冷却中，本窗口已探过一次仍被拒；约 {} 恢复",
+            format_reset_text(window_end as f64)
+        ),
+        window_end,
+        now,
+    )
 }
 
 /// 账号记录上的 provider id（缺失按默认 provider）。
@@ -779,7 +858,7 @@ pub(super) fn report_limit_event(
 
 #[cfg(test)]
 mod tests {
-    use super::earliest_limit_reset_at_in;
+    use super::{cooldown_window_already_probed, earliest_limit_reset_at_in, probed_window_error};
     use crate::server::core::routing::CooldownKeys;
     use serde_json::json;
 
@@ -796,6 +875,44 @@ mod tests {
     fn unlimited(id: &str, provider: &str) -> serde_json::Value {
         json!({ "id": id, "provider": provider, "enabled": true })
     }
+
+    /// 同一个冷却窗口只放一发探测：第一发放行（登记），之后每一发都拦下。
+    /// 这条钉的是「不再重复白烧上游」，而不改「先探一次」的语义。
+    #[test]
+    fn a_cooldown_window_is_probed_only_once() {
+        let now = 1_000_000i64;
+        let key = "codearts|acct-1|deepseek-v4.1-flash|1_600_000".to_string();
+        assert!(
+            !cooldown_window_already_probed(&key, now),
+            "第一发必须放行，否则探测语义就没了"
+        );
+        assert!(
+            cooldown_window_already_probed(&key, now),
+            "同窗口第二发必须拦下"
+        );
+        // 正对照：换窗口（上游把恢复时刻推后 / 恢复后又限额）是新的账
+        let next = "codearts|acct-1|deepseek-v4.1-flash|2_600_000".to_string();
+        assert!(
+            !cooldown_window_already_probed(&next, now),
+            "恢复时刻一变就该重新给一次探测机会"
+        );
+    }
+
+    /// 拦下来那一发回给客户端的是**可退避**的错误：429 + `Retry-After` + 恢复时刻。
+    #[test]
+    fn the_blocked_probe_backoffs_with_a_real_wait() {
+        let now = 1_000_000i64;
+        let error = probed_window_error(now + 90_000, now);
+        assert_eq!(429, error.status_code, "限额型终态得让客户端退避，不是 403");
+        assert_eq!(Some(90), error.retry_after_secs);
+        assert!(error.is_quota_limit(), "429 才有 reset_at / reset_at_text 那两格");
+
+        // 算不出未来时刻 ⇒ 不挂头（编一个等待时长比不给更坏）
+        let stale = probed_window_error(now - 1_000, now);
+        assert_eq!(429, stale.status_code);
+        assert_eq!(None, stale.retry_after_secs);
+    }
+
 
     /// 取**最早**的恢复时刻（不是最晚）：客户端该睡到第一个可能恢复的点
     #[test]

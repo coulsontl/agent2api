@@ -260,19 +260,6 @@ pub fn strip_reason_for(body: &Value, home_refuses_images: bool) -> Option<Strip
     None
 }
 
-/// `system` 那个字段的块数组形态（两种：直接是数组，或 `{content:[…]}`）。
-///
-/// 与 [`strip_history_images`] 里那段可变的取法形状一致（那里必须拿 `&mut`，
-/// 没法复用这个只读版）；两处形状不一致的话症状是"读数算上了 system 的图、
-/// 剥的时候却没碰它"。`system` 是字符串时没有图可言，返回 `None`。
-fn system_parts(body: &Value) -> Option<&Vec<Value>> {
-    match body.get("system") {
-        Some(Value::Array(parts)) => Some(parts),
-        Some(Value::Object(object)) => object.get("content").and_then(Value::as_array),
-        _ => None,
-    }
-}
-
 /// 剥掉历史图片，返回处理副本、摘除数与理由。
 ///
 /// `reason` 由调用方给（[`strip_reason_for`] 是唯一出处）：它决定原位留下的那句
@@ -318,7 +305,8 @@ pub fn strip_history_images(body: &Value, reason: StripReason) -> Option<Strippe
     }
 
     // ② system（各家入口折过来的形态有两种：块数组，或 `{content:[…]}` 对象）
-    //     `system_parts` 那个只读版是同一形状的读数版（见它的说明）。
+    //     这里必须拿 `&mut` 所以自己走一遍；曾有个同形状的只读版供体积读数用，
+    //     那支判据（按体积剥）在 2026-10-18 的收窄里删掉后它就成了死码，一并删。
     let system_parts = {
         match next.get_mut("system") {
             Some(Value::Array(_)) => next.get_mut("system").and_then(Value::as_array_mut),
@@ -394,7 +382,7 @@ mod strip_rules {
 
     use super::{
         current_turn_needs_vision, request_carries_images, strip_applies, strip_history_images,
-        strip_reason_for, StripNotice, StripReason, MARKER_TEXT_REFUSES,
+        strip_reason_for, StripReason, MARKER_TEXT_REFUSES,
     };
 
     /// 用例绝大多数走的是**能力那一支**（这家不吃图）：包一层，别在每个断言里

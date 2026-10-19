@@ -29,9 +29,32 @@
 use serde_json::Value;
 
 use crate::server::core::auth_http::send_raw;
+use crate::server::core::proxies::{resolve_account_proxy, ProxyResolution, ResolvedProxy};
 use crate::server::errors::GatewayError;
 
 use super::region::Region;
+
+/// 账号级出网代理（`record` 为 None / 未配代理 → None）。
+///
+/// ── 为什么本家需要它（别照抄「内网直连」的直觉）────────────────────
+/// 魔搭是**两个站点**（`modelscope.cn` / `www.modelscope.ai`），国际站对部分
+/// 出口 IP 会做区域限制；用户给某个账号配了日本出口正是为了稳定打国际站
+/// （实测：国际站 7 个账号全部绑了固定出口）。查询与模型目录若绕过账号代理直连，
+/// 会出现「转发走代理正常、余额/签到却超时或 403」的割裂现象 —— 用户配的代理
+/// 对他而言是这条账号的一部分，任何出网都该带上它。
+///
+/// 解析失败按 400 抛出（与其他内置家的 `account_proxy` 同一处置）：代理配置
+/// 坏了是配置问题，静默直连会让用户以为代理生效了。
+pub fn account_proxy(record: Option<&Value>) -> Result<Option<ResolvedProxy>, GatewayError> {
+    let Some(record) = record else {
+        return Ok(None);
+    };
+    match resolve_account_proxy(record.get("proxy")) {
+        Some(ProxyResolution::Resolved(proxy)) => Ok(Some(proxy)),
+        Some(ProxyResolution::Failed(reason)) => Err(GatewayError::with_status(400, reason)),
+        None => Ok(None),
+    }
+}
 
 /// 网页站接口的超时（余额 / 签到都是小请求，20 秒足够；别用 egress 默认的 600 秒
 /// SSE 超时，那会让一个挂住的查询把前端转圈转到天荒地老）
@@ -99,6 +122,7 @@ pub async fn site_get(
     region: Region,
     path: &str,
     token: &str,
+    proxy: Option<&ResolvedProxy>,
     what: &str,
 ) -> Result<Value, GatewayError> {
     if token.trim().is_empty() {
@@ -109,7 +133,7 @@ pub async fn site_get(
     }
     let url = site_url(region, path);
     let headers = vec![("Cookie".to_string(), format!("m_session_id={token}"))];
-    let response = send_raw("GET", &url, None, &headers, None, Some(REQUEST_TIMEOUT_MS))
+    let response = send_raw("GET", &url, None, &headers, proxy, Some(REQUEST_TIMEOUT_MS))
         .await
         .map_err(|error| {
             if error.is_timeout() {
@@ -145,6 +169,7 @@ pub async fn inference_get(
     region: Region,
     path: &str,
     token: &str,
+    proxy: Option<&ResolvedProxy>,
     what: &str,
 ) -> Result<Value, GatewayError> {
     if token.trim().is_empty() {
@@ -158,7 +183,7 @@ pub async fn inference_get(
         "Authorization".to_string(),
         format!("Bearer {token}"),
     )];
-    let response = send_raw("GET", &url, None, &headers, None, Some(REQUEST_TIMEOUT_MS))
+    let response = send_raw("GET", &url, None, &headers, proxy, Some(REQUEST_TIMEOUT_MS))
         .await
         .map_err(|error| {
             if error.is_timeout() {

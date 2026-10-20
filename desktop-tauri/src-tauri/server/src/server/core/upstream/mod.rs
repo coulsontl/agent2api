@@ -672,11 +672,14 @@ impl Stream for ForwardStream {
                     // 空闲守卫给的也是自带前缀的原文（见 stall::IDLE_TIMEOUT_PREFIX）
                     // —— 两者都不加「上游流式传输中断」前缀：那不是上游的不正常中断
                     let text = error.to_string();
+                    // 「上游流式传输中断」与另两类的**记账档**不同，见下面那段注释
+                    let mut broke_mid_stream = false;
                     let message = if text == cancellation::MANUAL_TERMINATED
                         || text.starts_with(stall::IDLE_TIMEOUT_PREFIX)
                     {
                         text
                     } else {
+                        broke_mid_stream = true;
                         format!("上游流式传输中断: {error}")
                     };
                     // 只在终端：这条原因由下面的 `note_error` 进请求日志
@@ -685,7 +688,23 @@ impl Stream for ForwardStream {
                     logging::console_line("[Model]", &format!("❌ {message}"));
                     // 旁路记账：断流原因要进请求日志（客户端此时已收到部分内容，
                     // HTTP 状态早就是 200，只有这里能解释「为什么这条是失败的」）
-                    self.telemetry.note_error(&message);
+                    //
+                    // ── 为什么上游断流记 **notice** 而另两类仍记 error ────────
+                    // 生产实测（2026-10-19 普查，NAS 生产 3.1.0）：`200 + error=
+                    // 上游流式传输中断: error decoding response body → …` 那 5 条
+                    // 全是这一支。走到这里时**已经下发的分片客户端都收到了**，
+                    // 而且下面还给它补了一条错误帧 + `[DONE]` —— 客户端不是被静默
+                    // 截断，是被明确告知。而 `is_success()` 是「2xx 且 error 为空」，
+                    // 记 error 的连带后果是 `normalize` 把 prompt/completion/total/cache
+                    // **全部清零**：这一发的额度真实消费了，报表却说它是零。
+                    // ⇒ 断流记成 notice（看得见、账不假）；「手动终止」与「空闲超时」
+                    //   两类保持原样，它们语义上仍是失败（前者是用户/我们主动结束，
+                    //   后者是上游吊死，都不是"内容送到了只是流没走完"）。
+                    if broke_mid_stream {
+                        self.telemetry.note_attempt_notice(&message);
+                    } else {
+                        self.telemetry.note_error(&message);
+                    }
                     self.pending.push_back(self::sse::sse_frame(&json!({
                         "error": {
                             "message": message,

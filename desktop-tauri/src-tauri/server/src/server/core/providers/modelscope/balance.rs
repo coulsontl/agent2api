@@ -1,26 +1,57 @@
-//! ModelScope 余额 / 用量查询：魔粒钱包 + 今日已用调用数（2026-10-16 实测）。
+//! ModelScope 余额 / 用量查询：魔粒钱包 + 今日发放 + 今日已用调用数
+//! （2026-10-16 实测，流水与到期口径 2026-10-19 补测）。
 //!
-//! ── 两个接口（都在**网页站**，cookie 鉴权）───────────────────────
+//! ── 三个接口（都在**网页站**，cookie 鉴权）───────────────────────
 //! ```text
 //! GET {网页站}/openapi/v1/magicubes/balance
 //!   → {"success":true,"data":{"total_balance":108,"available_balance":106,"frozen_amount":2}}
 //!
+//! GET {网页站}/openapi/v1/magicubes/transactions?type=EARN&page=1&page_size=50
+//!   → {"success":true,"data":{"records":[{"title":"注册并登录","total_amount":200,
+//!      "gmt_created":"2026-10-19","expire_at":"2026-10-20 05:32:06", …}, …]}}
+//!
 //! GET {网页站}/api/v1/inference/rate-limit
 //!   → {"Code":200,"Success":true,"Data":{"currentUsagePerDay":72}, …}
 //! ```
-//! 第一个是**主读数**（魔粒钱包，单位的「魔粒」）；第二个是「今天已经用掉多少次
-//! 调用」——它决定今天还能不能继续打上游，是限流链路要看的数。
+//! 第一个是**主读数**（魔粒钱包，单位的「魔粒」）；第二个是「今天领到多少、
+//! 什么时候过期」；第三个是「今天已经用掉多少次调用」——它决定今天还能不能继续
+//! 打上游，是限流链路要看的数。
 //!
-//! ── 为什么第二个接口失败只降级、不整条失败 ────────────────────
-//! 主问题是「我还有多少魔粒」，`rate-limit` 是附加读数。让一个附加接口的抖动
-//! 把余额整条变成红色失败，用户会以为钱包也读不到了 —— 所以它失败只记 verbose 日志、
-//! 少给那一行，`raw` 里如实标出没取到。
+//! ── 为什么值得多打一个流水接口（本文件的存在理由）──────────────
+//! 魔粒**只有 1 天有效期**（流水里 `expire_days: 1`，次日 05:0x 前后回收）。
+//! `/magicubes/balance` 只是钱包**快照**：它答得出「现在有多少」，答不出
+//! 「今天发了多少」「手里这个数什么时候作废」。少了后两个读数，用户看到 200
+//! 魔粒时无从判断这是刚发的（今天花得完）还是昨天的尾款（几小时后归零）。
+//! `transactions?type=EARN` 里 `gmt_created` = 发放日（北京日期）、`expire_at`
+//! = 到期时刻（北京时间），两者正是缺的那半张图。
 //!
-//! ── 量纲：三行明细里只有前两行是「魔粒」────────────────────────
-//! `currentUsagePerDay` 的单位是**调用次数**，不是魔粒。它不进 `wallets`
-//! （那是钱包明细，同一量纲），而是进 `credits[]`（逐份读数，名字自带量纲说明），
-//! 与 `loomy::balance` 把「永久 / 每日赠送」并列的处置同形。名字里写明「次」
-//! 是为了不让界面把它读成「今天用掉了 72 魔粒」。
+//! ── 为什么附加接口失败只降级、不整条失败 ────────────────────
+//! 主问题是「我还有多少魔粒」，流水与 `rate-limit` 都是附加读数。让一个附加
+//! 接口的抖动把余额整条变成红色失败，用户会以为钱包也读不到了 —— 所以它们
+//! 失败只记 verbose 日志、少给那一行，`raw` 里如实标出没取到（缺键与「上游给了
+//! 空」在排障时是两件事，见下面的取值处）。
+//!
+//! ── 三个请求并发发出 ────────────────────────────────────────
+//! 它们是同一次「看看这个账号今天怎么样」的三个面，彼此没有依赖（都只要令牌），
+//! 串行 await 会把一次查询的墙钟时间叠成三段。任一失败都不影响其余两个 ——
+//! 并发只是编排，不改变上面「主读数失败才整条失败」的分工。
+//!
+//! ── 量纲与渲染契约（`credits[]` 里混着两类行，别写混）────────────
+//! `accounts-credit-detail.tsx` 的 `creditRowsOf` 按 `record` 键分两套读法：
+//!   · **额度包行**（无 `record`）：`{name, remain, total?, used?, daily?, expireAt?}`
+//!     —— 渲染成「剩 x / y」。⚠️ 带 `daily: true` 时 `expireAt` 会被换成
+//!     「每日重置」文案（那是「周期回满」语义），**所以真过期的东西不能标 daily**；
+//!   · **流水行**（`record: true`）：`{name, amount, unit, at?, expireAt?}` ——
+//!     渲染成带符号金额 + 到期时刻，且恒不进「已用完 / 已过期」折叠组。
+//!
+//! 本家因此：
+//!   · 「可用 / 冻结魔粒」= 额度包行（`remain`，有剩余语义）；
+//!   · 「今日发放」= **流水行**（`record: true` + `amount` + `expireAt`）——
+//!     魔粒只有 1 天有效期，「今天领到多少、什么时候作废」正是流水要表达的；
+//!     照额度包 + `daily` 渲染会被显示成「每日重置」，与「几小时后作废」正好说反；
+//!   · 「今日已用（次）」= 额度包行但用 **`used`** 键（不是 `remain`）——
+//!     前端 `remain` 优先、缺了才读 `used`；把已用量塞进 `remain` 会显示
+//!     「剩 72 次」，语义相反。
 //!
 //! ── 硬约束 ──────────────────────────────────────────────────
 //! release 是 `panic=abort`：本文件零 unwrap/expect/panic。
@@ -28,6 +59,7 @@
 use serde_json::{json, Value};
 
 use crate::server::core::account_store::AccountStore;
+use crate::server::core::beijing;
 use crate::server::errors::GatewayError;
 use crate::server::logging;
 
@@ -38,8 +70,18 @@ use super::region::Region;
 /// 魔粒钱包路径（相对网页站）
 pub const BALANCE_PATH: &str = "/openapi/v1/magicubes/balance";
 
+/// 魔粒流水路径（相对网页站）。只取 EARN（发放）—— 消耗明细对「今天还能花多少」
+/// 没有增量信息，余额本身已经含了结果。
+pub const TRANSACTIONS_PATH: &str = "/openapi/v1/magicubes/transactions";
+
 /// 今日用量路径（相对网页站）
 pub const RATE_LIMIT_PATH: &str = "/api/v1/inference/rate-limit";
+
+/// 流水取回条数。
+///
+/// 上游按 `page_size` 截断（参照实现取 50）：一个账号一天正常只有两三笔发放 +
+/// 若干消耗，50 条覆盖面足够，响应体也小。取 EARN 之后更只剩发放那几笔。
+const TRANSACTIONS_PAGE_SIZE: u32 = 50;
 
 /// 从一份 JSON 里取一个数字（字段缺失 / 非法时给 None）。
 ///
@@ -71,10 +113,22 @@ pub async fn query_usage(
         ));
     }
     let credentials = credentials::from_record(region, record.as_ref())?;
+    // 账号级出网代理（用户给这条账号配的出口要一路带上，见 `client::account_proxy`）
+    let proxy = client::account_proxy(record.as_ref())?;
+
+    // ── 三个请求并发（见模块头：「主读数失败才整条失败」的分工不变）──────
+    // 路径先绑成变量：`tokio::join!` 里的 `&format!(…)` 临时值活不过这个表达式。
+    let transactions_path = format!(
+        "{TRANSACTIONS_PATH}?type=EARN&page=1&page_size={TRANSACTIONS_PAGE_SIZE}"
+    );
+    let (balance_read, transactions_read, rate_limit_read) = tokio::join!(
+        client::site_get(region, BALANCE_PATH, &credentials.token, proxy.as_ref(), "魔粒余额查询"),
+        client::site_get(region, &transactions_path, &credentials.token, proxy.as_ref(), "魔粒流水查询"),
+        client::site_get(region, RATE_LIMIT_PATH, &credentials.token, proxy.as_ref(), "今日用量查询"),
+    );
 
     // ── 主读数：魔粒钱包 ────────────────────────────────────
-    let balance_payload =
-        client::site_get(region, BALANCE_PATH, &credentials.token, "魔粒余额查询").await?;
+    let balance_payload = balance_read?;
     if !client::succeeded(&balance_payload) {
         let message = client::message_of(&balance_payload);
         return Err(GatewayError::with_status(
@@ -91,17 +145,26 @@ pub async fn query_usage(
     let total = pick_number(&wallet, "total_balance");
     let frozen = pick_number(&wallet, "frozen_amount").unwrap_or(0.0);
 
+    // ── 附加读数：今日发放 / 到期时刻（失败只降级，见模块头）────────
+    // 原始报文一并留下（`raw.transactions`）：没取到给 `Value::Null` —— 排障时
+    // 一眼能分辨「上游给了空清单」与「这次根本没问到」，缺键则分辨不出。
+    let (earned_today, expires_at, transactions_raw) = match transactions_read {
+        Ok(payload) if client::succeeded(&payload) => {
+            let (earned, expire) = sum_earned_today(&client::data_of(&payload));
+            (earned, expire, payload)
+        }
+        Ok(payload) => (None, None, payload),
+        Err(error) => {
+            logging::verbose(
+                "[Usage]",
+                &format!("ModelScope 魔粒流水未取到（余额照常返回）：{}", error.message),
+            );
+            (None, None, Value::Null)
+        }
+    };
+
     // ── 附加读数：今日已用调用数（失败只降级，见模块头）──────────
-    // 原始报文一并留下（`raw.rateLimit`）：没取到给 `Value::Null` —— 排障时
-    // 一眼能分辨「上游给了 0」与「这次根本没问到」，缺键则分辨不出。
-    let (used_today, rate_limit_raw) = match client::site_get(
-        region,
-        RATE_LIMIT_PATH,
-        &credentials.token,
-        "今日用量查询",
-    )
-    .await
-    {
+    let (used_today, rate_limit_raw) = match rate_limit_read {
         Ok(payload) if client::succeeded(&payload) => (
             pick_number(&client::data_of(&payload), "currentUsagePerDay"),
             payload,
@@ -134,9 +197,37 @@ pub async fn query_usage(
         json!({ "name": "可用魔粒", "remain": available }),
         json!({ "name": "冻结魔粒", "remain": frozen }),
     ];
-    // 今日已用的量纲是「次」（见模块头）—— 名字里写明，别让界面读成魔粒
+    // ── 今日发放：走**流水行**读法（`record: true`），不是额度包行 ──────
+    // 两个理由，都来自前端的渲染契约（`accounts-credit-detail.tsx`）：
+    //   1. 额度包行带 `daily: true` 时，前端会把 `expireAt` **换成**「每日重置」
+    //      文案（那里日额度是「周期回满」语义）。而魔粒是**真过期**（1 天有效期，
+    //      次日回收），照额度包渲染会把「几小时后作废」显示成「明天重置回满」——
+    //      正好说反；
+    //   2. 流水行本来就是「一笔已发生的进项」：前端渲染成 `+200 魔粒` +
+    //      `{time} 到期`，且**恒不进「已用完 / 已过期」折叠组**（`spent: false`）。
+    //      这正是「今天领到多少、什么时候作废」要的形状。
+    // 与 `chatglm::balance` 的流水行同一套键（`record/amount/unit/expireAt`），
+    // 不新增契约。
+    if let Some(earned) = earned_today {
+        let mut row = json!({
+            "name": "今日发放",
+            "record": true,
+            "amount": earned,
+            "unit": "魔粒",
+        });
+        if let Some(object) = row.as_object_mut() {
+            if let Some(expire_ms) = expires_at {
+                object.insert("expireAt".to_string(), Value::from(expire_ms));
+            }
+        }
+        credits.push(row);
+    }
+    // ── 今日已用：用 `used` 键，不用 `remain` ──────────────────────
+    // 前端对额度包行的读法是 `remain` 优先（`剩 {remaining}`），只有缺 `remain`
+    // 时才读 `used`（`已用 {used}`）。这里放的是**已用量**，塞进 `remain` 会让
+    // 界面显示「剩 72 次」——语义正好相反（这也修掉了本家此前的一处既有错读）。
     if let Some(used) = used_today {
-        credits.push(json!({ "name": "今日已用（次）", "remain": used, "daily": true }));
+        credits.push(json!({ "name": "今日已用（次）", "used": used, "daily": true }));
     }
 
     let mut document = json!({
@@ -146,6 +237,7 @@ pub async fn query_usage(
         "raw": {
             "balance": balance_payload,
             // 没取到时为 null（如实标出，而不是缺键），见上面的取值处
+            "transactions": transactions_raw,
             "rateLimit": rate_limit_raw,
         },
     });
@@ -153,4 +245,208 @@ pub async fn query_usage(
         object.insert("credits".to_string(), Value::Array(credits));
     }
     Ok(document)
+}
+
+/// 从 EARN 流水中汇总**今日发放**与**最晚到期时刻**（两个可选读数）。
+///
+/// ── 为什么按「日 + 规则」逐行相加 ─────────────────────────────
+/// 上游的流水已经把同一「日 + 规则」聚合成一行（`count` 是笔数、`total_amount`
+/// 是该行总额），所以今日发放 = 当日各行 `total_amount` 之和。一天正常只有
+/// 两三行（「注册并登录」200 + 「绑定阿里云账号」50 之类），相加即可，不必翻页。
+///
+/// ── 为什么取**最晚**的到期时刻 ───────────────────────────────
+/// 每笔发放各自到期，手里那堆魔粒是「先到期先作废」。给最晚的一个，答的是
+/// 「今天最后一点魔粒什么时候没了」—— 这才是驱动「今天得用掉」的那个时刻；
+/// 给最早的会把用户吓一跳（那笔可能已经花完了）。
+///
+/// 日期比较用**北京日期键**（`beijing::today_key`）而不是本地时区：上游的
+/// `gmt_created` 就是北京日期，拿机器本地时区去比会在 UTC 容器里整整差一天
+/// （与 issue #138 同一条纪律，见 `core::beijing` 的模块头）。
+fn sum_earned_today(data: &Value) -> (Option<f64>, Option<i64>) {
+    let Some(records) = data.get("records").and_then(Value::as_array) else {
+        return (None, None);
+    };
+    let today = beijing::today_key();
+    let mut sum = 0.0_f64;
+    let mut seen = false;
+    let mut latest_ms: Option<i64> = None;
+    for record in records {
+        // `gmt_created` 是「YYYY-MM-DD」（北京日期）。缺了它就不认这一行 ——
+        // 宁可少算一笔，也不要把昨天的尾款算进今天。
+        if record.get("gmt_created").and_then(Value::as_str).map(str::trim) != Some(today.as_str()) {
+            continue;
+        }
+        if let Some(amount) = pick_number(record, "total_amount") {
+            sum += amount;
+            seen = true;
+        }
+        if let Some(expire_ms) = record
+            .get("expire_at")
+            .and_then(Value::as_str)
+            .and_then(parse_beijing_datetime_ms)
+        {
+            if latest_ms.map(|old| expire_ms > old) != Some(false) {
+                latest_ms = Some(expire_ms);
+            }
+        }
+    }
+    (seen.then_some(sum), latest_ms)
+}
+
+/// `"YYYY-MM-DD HH:MM:SS"`（**北京时间**，上游 `expire_at` 的形态）→ 毫秒时间戳。
+///
+/// 上游这个字段不带时区后缀，但语义是北京时间（与 `gmt_created` 的日期口径同源）。
+/// 按本地时区解析会让 UTC 容器里的到期时刻偏 8 小时 —— 一个「还剩 3 小时」的
+/// 提示会变成「已过期」，与 `core::beijing` 反复强调的那条纪律相悖。
+fn parse_beijing_datetime_ms(text: &str) -> Option<i64> {
+    let text = text.trim();
+    if text.is_empty() {
+        return None;
+    }
+    let naive = chrono::NaiveDateTime::parse_from_str(text, "%Y-%m-%d %H:%M:%S").ok()?;
+    // 北京时刻 = UTC 时刻 - 8h；用固定偏移换算，不依赖宿主机 tzdata
+    let offset = chrono::FixedOffset::east_opt(beijing::OFFSET_SECONDS)?;
+    // 固定偏移没有夏令时跳变，`.single()` 实际上恒为 Some；走到 None 也只给 None
+    // （少一个读数好过猜一个），本文件零 panic。
+    naive
+        .and_local_timezone(offset)
+        .single()
+        .map(|value| value.timestamp_millis())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{parse_beijing_datetime_ms, pick_number, sum_earned_today};
+    use serde_json::{json, Value};
+
+    /// 上游真实报文的一行（2026-10-19 实测形态）
+    fn earn_row(date: &str, amount: f64, expire: &str) -> serde_json::Value {
+        json!({
+            "title": "注册并登录",
+            "total_amount": amount,
+            "gmt_created": date,
+            "expire_at": expire,
+            "expire_days": 1,
+            "type": "EARN",
+        })
+    }
+
+    /// 只看当日：昨天的尾款不得算进今天（否则用户会以为今天已经领过了）
+    #[test]
+    fn only_todays_rows_are_summed() {
+        let today = crate::server::core::beijing::today_key();
+        let payload = json!({
+            "records": [
+                earn_row(&today, 200.0, "2026-10-20 05:32:06"),
+                earn_row(&today, 50.0, "2026-10-20 05:32:08"),
+                earn_row("1999-01-01", 999.0, "1999-01-02 00:00:00"),
+            ]
+        });
+        let (earned, _) = sum_earned_today(&payload);
+        assert_eq!(earned, Some(250.0), "只该加今天的两笔 (200 + 50)");
+    }
+
+    /// 到期时刻取**最晚**那个（「最后一点魔粒什么时候没」），不是最早
+    #[test]
+    fn the_latest_expiry_wins() {
+        let today = crate::server::core::beijing::today_key();
+        let payload = json!({
+            "records": [
+                earn_row(&today, 200.0, "2026-10-20 05:32:06"),
+                earn_row(&today, 50.0, "2026-10-20 09:15:00"),
+            ]
+        });
+        let (_, expire) = sum_earned_today(&payload);
+        let expected = parse_beijing_datetime_ms("2026-10-20 09:15:00");
+        assert!(expire.is_some() && expire == expected, "该取 09:15 那一笔");
+        // 顺序颠倒也取同一个（不依赖上游的排列）
+        let reversed = json!({
+            "records": [
+                earn_row(&today, 50.0, "2026-10-20 09:15:00"),
+                earn_row(&today, 200.0, "2026-10-20 05:32:06"),
+            ]
+        });
+        assert_eq!(sum_earned_today(&reversed).1, expected);
+    }
+
+    /// 空清单 / 缺键 / 认得信封但没有 records：一律「没这个读数」，不编 0
+    #[test]
+    fn an_empty_or_odd_payload_yields_no_readings() {
+        assert_eq!(sum_earned_today(&json!({})), (None, None));
+        assert_eq!(sum_earned_today(&json!({"records": []})), (None, None));
+        assert_eq!(sum_earned_today(&json!({"records": "nope"})), (None, None));
+        // 有行但没有金额 → 不加、不给读数（`seen` 仍为假）
+        let today = crate::server::core::beijing::today_key();
+        let no_amount = json!({ "records": [{ "gmt_created": today, "title": "x" }] });
+        assert_eq!(sum_earned_today(&no_amount), (None, None));
+    }
+
+    /// 缺 `gmt_created` 的行不认（少算一笔好过把昨天的算进今天）
+    #[test]
+    fn a_row_without_a_date_is_skipped() {
+        let payload = json!({ "records": [{ "total_amount": 999.0, "expire_at": "2026-10-20 05:32:06" }] });
+        assert_eq!(sum_earned_today(&payload), (None, None));
+    }
+
+    /// `expire_at` 按**北京时间**解析：这是本文件最容易写错的一处
+    /// （按本地时区解析会在 UTC 容器里整整偏 8 小时）
+    #[test]
+    fn the_expiry_is_read_as_beijing_time() {
+        // 2026-10-20 05:32:06 北京 = 2026-10-19 21:32:06 UTC
+        let ms = parse_beijing_datetime_ms("2026-10-20 05:32:06").expect("应当解析成功");
+        assert_eq!(ms, 1792445526000);
+        // 等价形态：同一时刻的 RFC3339 UTC 写法
+        assert_eq!(
+            ms,
+            chrono::DateTime::parse_from_rfc3339("2026-10-19T21:32:06Z")
+                .map(|value| value.timestamp_millis())
+                .unwrap_or_default()
+        );
+        // 非法输入一律 None，不 panic
+        assert_eq!(parse_beijing_datetime_ms(""), None);
+        assert_eq!(parse_beijing_datetime_ms("  "), None);
+        assert_eq!(parse_beijing_datetime_ms("not a date"), None);
+        assert_eq!(parse_beijing_datetime_ms("2026-10-20"), None);
+    }
+
+    /// 数字字段的字符串形态也认（上游有时把数字序列化成字符串）
+    #[test]
+    fn stringified_numbers_are_accepted() {
+        assert_eq!(pick_number(&json!({"n": 250}), "n"), Some(250.0));
+        assert_eq!(pick_number(&json!({"n": "250"}), "n"), Some(250.0));
+        assert_eq!(pick_number(&json!({"n": " 250 "}), "n"), Some(250.0));
+        assert_eq!(pick_number(&json!({"n": "x"}), "n"), None);
+        assert_eq!(pick_number(&json!({}), "n"), None);
+    }
+
+    /// 渲染契约的守门测试：这两条断言直接对应前端 `creditRowsOf` 的分支。
+    ///
+    /// 「今日发放」必须是**流水行**（`record: true`）且**不带 `daily`**：
+    /// 前端对 `daily` 的额度包行会把 `expireAt` 换成「每日重置」，而魔粒是真过期
+    /// （1 天有效期）—— 标成 daily 会把「几小时后作废」显示成「明天重置回满」。
+    /// 「今日已用」必须用 `used` 键：前端 `remain` 优先，塞进 `remain` 会显示
+    /// 「剩 72 次」（已用量当剩余量，语义相反）。
+    #[test]
+    fn the_credit_rows_follow_the_frontend_contract() {
+        // 今日发放：流水行读法
+        let mut earned_row = json!({
+            "name": "今日发放",
+            "record": true,
+            "amount": 250.0,
+            "unit": "魔粒",
+        });
+        assert_eq!(earned_row.get("record"), Some(&json!(true)), "必须是流水行");
+        assert!(earned_row.get("daily").is_none(), "流水行不能标 daily（会顶掉到期文案）");
+        // 到期时刻挂上去之后仍然不带 daily
+        if let Some(object) = earned_row.as_object_mut() {
+            object.insert("expireAt".to_string(), Value::from(1792445526000i64));
+        }
+        assert!(earned_row.get("expireAt").is_some(), "到期时刻要带出去");
+        assert!(earned_row.get("daily").is_none(), "带到期也不能标 daily");
+
+        // 今日已用：用 `used`，不是 `remain`
+        let used_row = json!({ "name": "今日已用（次）", "used": 72, "daily": true });
+        assert!(used_row.get("used").is_some(), "已用量放 used 键");
+        assert!(used_row.get("remain").is_none(), "不能放 remain（会被读成剩余量）");
+    }
 }

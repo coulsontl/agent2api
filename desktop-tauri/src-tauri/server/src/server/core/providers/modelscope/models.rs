@@ -35,6 +35,7 @@ use std::sync::{Mutex, OnceLock};
 
 use serde_json::{json, Value};
 
+use crate::server::core::proxies::ResolvedProxy;
 use crate::server::core::providers::adapter::ModelRefreshOutcome;
 use crate::server::core::providers::catalog_cache;
 
@@ -148,7 +149,15 @@ pub fn remote_refreshed(region: Region) -> bool {
 ///
 /// `force = false`（自动路径）时 10 分钟 TTL 内早退为 `unchanged()`；
 /// `force = true`（用户手动刷新）真打上游。
-pub async fn refresh(region: Region, token: &str, force: bool) -> ModelRefreshOutcome {
+///
+/// `proxy` 是**该账号**的出网代理：国际站的目录接口对出口 IP 敏感，用户给账号
+/// 配了出口就得带上（见 `client::account_proxy`）。
+pub async fn refresh(
+    region: Region,
+    token: &str,
+    proxy: Option<&ResolvedProxy>,
+    force: bool,
+) -> ModelRefreshOutcome {
     let now = crate::server::logging::now_ms();
     if !force {
         let fresh = with_state(region, |slot| {
@@ -160,10 +169,11 @@ pub async fn refresh(region: Region, token: &str, force: bool) -> ModelRefreshOu
             return ModelRefreshOutcome::unchanged();
         }
     }
-    let payload = match client::inference_get(region, MODELS_PATH, token, "模型目录查询").await {
-        Ok(payload) => payload,
-        Err(error) => return ModelRefreshOutcome::failed(error.message),
-    };
+    let payload =
+        match client::inference_get(region, MODELS_PATH, token, proxy, "模型目录查询").await {
+            Ok(payload) => payload,
+            Err(error) => return ModelRefreshOutcome::failed(error.message),
+        };
     let models = parse_models(&payload);
     if models.is_empty() {
         return ModelRefreshOutcome::failed("ModelScope 模型目录为空或格式不认识（保留现有清单）");

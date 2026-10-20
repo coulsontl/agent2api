@@ -318,7 +318,12 @@ impl ProviderAdapter for ModelScopeAdapter {
                 Ok(credentials) => credentials,
                 Err(error) => return ModelRefreshOutcome::failed(error.message),
             };
-            models::refresh(region, &credentials.token, force).await
+            // 账号级出网代理：目录接口在推理域，国际站对出口 IP 敏感
+            let proxy = match client::account_proxy(record.as_ref()) {
+                Ok(proxy) => proxy,
+                Err(error) => return ModelRefreshOutcome::failed(error.message),
+            };
+            models::refresh(region, &credentials.token, proxy.as_ref(), force).await
         })
     }
 

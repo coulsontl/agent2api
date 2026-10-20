@@ -84,8 +84,14 @@ pub fn parse_identity(payload: &Value) -> Identity {
 }
 
 /// 用令牌探一次身份（同时也是当日签到，见模块头）。
+///
+/// ── 为什么这里**没有**代理参数（与其余几个调用点不同）─────────────
+/// 本函数只在「粘贴令牌添加账号」这一步跑，而那一刻账号记录还不存在 ——
+/// 代理是**账号的属性**（添加后在账号页 / 批量操作里配），此时没有可解析的对象。
+/// 因此这次探活按直连走；用户随后给账号配了出口，之后的余额 / 签到 / 目录刷新
+/// 都会带上它（见 `client::account_proxy` 的说明）。
 pub async fn identify(region: Region, token: &str) -> Result<Identity, GatewayError> {
-    let payload = client::site_get(region, LOGIN_INFO_PATH, token, "令牌校验").await?;
+    let payload = client::site_get(region, LOGIN_INFO_PATH, token, None, "令牌校验").await?;
     if !client::succeeded(&payload) {
         let message = client::message_of(&payload);
         return Err(GatewayError::with_status(

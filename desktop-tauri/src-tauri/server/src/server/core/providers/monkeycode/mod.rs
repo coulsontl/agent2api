@@ -53,6 +53,7 @@ pub mod chat;
 pub mod client;
 pub mod credentials;
 pub mod endpoints;
+pub mod inflight;
 pub mod login;
 pub mod models;
 pub mod region;

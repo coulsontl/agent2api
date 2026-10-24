@@ -17,10 +17,12 @@
 //! ── 硬约束 ──────────────────────────────────────────────────
 //! release 是 `panic=abort`：本文件零 unwrap/expect/panic。
 
-use serde_json::Value;
+use serde_json::{json, Value};
 
 use crate::server::core::auth_http::send_raw;
+use crate::server::core::proxies::ResolvedProxy;
 use crate::server::errors::GatewayError;
+use crate::server::logging;
 
 use super::endpoints;
 use super::region::Region;
@@ -118,4 +120,123 @@ pub async fn get_json(
     what: &str,
 ) -> Result<Value, GatewayError> {
     request("GET", region, path, session, None, what).await
+}
+
+/// 停止一个上游任务（`PUT /api/v1/users/tasks/stop`，body `{"id": "<taskId>"}`）。
+///
+/// ── 为什么这件事必须做（本家最容易漏的一步）─────────────────
+/// 上游的并发额度按「`pending` + `processing` 的任务数」算（业务码 10811），
+/// 而**一轮对话结束不等于任务结束** —— `task-ended` 只结束本轮，任务仍停在
+/// `processing`，那是给多轮复用留的窗口。本网关每个下游请求都新建一个任务，
+/// 因此每次收尾都必须显式停止；否则账号槽位会被一直占着（直到 VM 空闲回收，
+/// 默认 3 天），第二次请求就稳定撞 10811。
+///
+/// ── 失败不上升为错误 ────────────────────────────────────────
+/// 调用点全在「这一轮已经定局」的收尾路径上（成功 / 出错 / 客户端断开 /
+/// 超时）。此时再报错既改不了结论，又会让真正的失败原因被淹没。因此这里只
+/// 返回 `bool` 表示是否停成，由调用方记一行 verbose；网络错误 / 401 / 业务码
+/// 非 0 一律按「没停成」处理，**不抛错**。
+///
+/// `proxy` 与建任务用同一个出口：建任务走了账号代理，停止也必须走，
+/// 否则「建得出去、停不回来」—— 那正好是槽位泄漏最坏的情形。
+pub async fn stop_task(
+    region: Region,
+    session: &str,
+    task_id: &str,
+    proxy: Option<&ResolvedProxy>,
+) -> bool {
+    if task_id.trim().is_empty() || session.trim().is_empty() {
+        return false;
+    }
+    let url = endpoints::task_stop_url(region);
+    let headers = endpoints::authed_headers(region, session);
+    let body = json!({ "id": task_id.trim() });
+    let result = send_raw(
+        "PUT",
+        &url,
+        Some(&body),
+        &headers,
+        proxy,
+        Some(REQUEST_TIMEOUT_MS),
+    )
+    .await;
+    match result {
+        Ok(response) => {
+            // 成功形态是 `{"code":0,...}`；非 2xx 或业务码非 0 都算没停成
+            let business_ok = match response.payload.as_ref() {
+                Some(payload) => business_code(payload)
+                    .map(|code| code == SUCCESS_CODE)
+                    .unwrap_or(response.ok),
+                None => response.ok,
+            };
+            let ok = response.ok && business_ok;
+            logging::verbose(
+                "[MonkeyCode]",
+                &format!(
+                    "停止任务 {task_id} {}（HTTP {}）",
+                    if ok { "成功" } else { "未成功" },
+                    response.status
+                ),
+            );
+            ok
+        }
+        Err(error) => {
+            logging::verbose(
+                "[MonkeyCode]",
+                &format!("停止任务 {task_id} 请求失败：{error}"),
+            );
+            false
+        }
+    }
+}
+
+/// 列出该账号**正在运行**（`pending` / `processing`）的任务 id。
+///
+/// 用于建任务撞 10811 之后的自愈：把残留任务停掉再重试一次。取不到
+/// （网络错 / 结构变化）返回空表 —— 调用方据此放弃自愈，把原始错误透传。
+pub async fn list_running_tasks(region: Region, session: &str) -> Vec<String> {
+    let url = endpoints::tasks_running_url(region);
+    let path = url
+        .strip_prefix(&region.base_url())
+        .unwrap_or(endpoints::TASKS_PATH);
+    let payload = match get_json(region, path, session, "运行中任务列表查询").await {
+        Ok(payload) => payload,
+        Err(error) => {
+            logging::verbose(
+                "[MonkeyCode]",
+                &format!("运行中任务列表查询失败（放弃自愈）：{}", error.message),
+            );
+            return Vec::new();
+        }
+    };
+    let data = payload.get("data").unwrap_or(&payload);
+    let tasks = data
+        .get("tasks")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    let mut ids = Vec::new();
+    for task in tasks {
+        let status = task
+            .get("status")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .trim()
+            .to_ascii_lowercase();
+        // 只认这两种「占槽位」的状态（上游 `consts.TaskStatus*`）。上游已按
+        // status 过滤，这里再判一次是因为过滤是上游的事：万一它忽略了 query
+        // 参数，我们不能把 finished 的任务也去停一遍。
+        if status != "pending" && status != "processing" {
+            continue;
+        }
+        let id = task
+            .get("id")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .unwrap_or("");
+        if !id.is_empty() {
+            ids.push(id.to_string());
+        }
+    }
+    ids
 }

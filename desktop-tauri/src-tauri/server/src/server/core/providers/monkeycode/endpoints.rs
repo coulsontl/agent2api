@@ -53,6 +53,22 @@ pub const TASK_CREATE_PATH: &str = "/api/v1/users/tasks";
 /// 任务流 WebSocket 路径（`?id=<taskId>&mode=new|attach`，见 `task_stream_url`）
 pub const TASK_STREAM_PATH: &str = "/api/v1/users/tasks/stream";
 
+/// 停止任务路径（`PUT {base}/api/v1/users/tasks/stop`，body `{"id": "<taskId>"}`）。
+///
+/// 本网关**每个下游请求都新建一个上游任务**（见 `chat.rs`），而上游的任务状态
+/// 只有 `pending` / `processing` / `finished` / `error` 四种，并发额度按
+/// 「`pending` + `processing` 的任务数」算（上游 `entx.TaskConcurrencyHook`，
+/// 业务码 10811）。一轮对话结束（`task-ended`）**不会**把任务置为 finished ——
+/// 那是给多轮复用留的窗口。因此本网关必须在每次转发收尾时显式停止任务，
+/// 否则账号上的槽位会被一直占着，第二次请求就必然撞 10811。
+pub const TASK_STOP_PATH: &str = "/api/v1/users/tasks/stop";
+
+/// 任务列表路径的查询串形态（停止前发现残留任务时用：列出运行中的任务）。
+///
+/// 上游 `GET /api/v1/users/tasks?status=pending,processing`（`domain.TaskListReq`
+/// 的 `status` 支持逗号分隔多值，见 `task.go::List`）。
+pub const TASKS_RUNNING_QUERY: &str = "?page=1&size=20&status=pending,processing";
+
 /// 建任务默认宿主机：公共主机（参考 `task-runner.ts::DEFAULT_HOST_ID`）。
 ///
 /// 自建 / 私有云站点的宿主机名可能不是它，因此与 `BASE_URL` 同款留了环境变量
@@ -109,6 +125,16 @@ pub fn tasks_discover_url(region: Region) -> String {
 /// 建任务接口的完整 URL
 pub fn task_create_url(region: Region) -> String {
     format!("{}{TASK_CREATE_PATH}", region.base_url())
+}
+
+/// 运行中任务列表的完整 URL（停止残留任务前用，见 `TASK_STOP_PATH` 的说明）
+pub fn tasks_running_url(region: Region) -> String {
+    format!("{}{TASKS_PATH}{TASKS_RUNNING_QUERY}", region.base_url())
+}
+
+/// 停止任务接口的完整 URL（`PUT`，body `{"id": "<taskId>"}`）
+pub fn task_stop_url(region: Region) -> String {
+    format!("{}{TASK_STOP_PATH}", region.base_url())
 }
 
 /// 建任务用的宿主机名（`MONKEYCODE_HOST_ID` / `MONKEYCODE_INTL_HOST_ID` 可覆盖）

@@ -22,6 +22,20 @@
 //! 事件由 VM 内的 coding agent 实时推送 —— 不是「一次 HTTP 请求一次回答」，
 //! 单请求构造（`build_chat_request`）容纳不了这条链（`is_stateful` 为 true）。
 //!
+//! ── 收尾为什么必须停止任务（10811 的根因）──────────────────────
+//! 上游的任务状态只有 `pending` / `processing` / `finished` / `error`，而并发
+//! 额度按「`pending` + `processing` 的任务数」算（上游 `entx.TaskConcurrencyHook`，
+//! 业务码 **10811**）。关键语义：**`task-ended` 只结束本轮，不结束任务** ——
+//! 任务会停在 `processing` 给多轮复用留窗口。本网关每个下游请求都新建一个
+//! 任务，因此每轮收尾都必须显式停止；否则账号槽位会被占到 VM 空闲回收
+//! （默认 3 天），第二次请求就稳定撞 10811。
+//!
+//! 停止动作覆盖的路径（漏一条就漏一个槽位）：
+//!   - `close_and_stop`：四个终态出口 + 两处「客户端已断开」；
+//!   - `StopOnDrop`：future 被丢弃（abort / 运行时关闭）的兜底；
+//!   - `chat.rs` 的 ⑤ / ⑥ 失败：任务已建出来但流没起来；
+//!   - `chat.rs::create_task_with_recovery`：撞 10811 时清理历史残留。
+//!
 //! ── 终态怎么判（不挂死的关键）─────────────────────────────────
 //! 四个出口，**每个都会给下游一个收尾**（`finish` 帧 + `[DONE]`，或错误帧）：
 //!   1. `task-ended` → 正常收尾；
@@ -90,9 +104,27 @@ const TASK_TIMEOUT_MS: u64 = 60 * 60 * 1000;
 const MIN_IDLE_MS: u64 = 30_000;
 
 /// 已建连的任务流（`chat.rs` 装配后交给 `drive_stream` / `drive_aggregate`）。
+///
+/// ── 为什么带着 session ──────────────────────────────────────
+/// 收尾时要 `PUT /users/tasks/stop` 把任务置为 finished（否则账号的并发槽位
+/// 会被一直占着，见 `client::stop_task` 的说明）。停止是一次 REST 调用而不是
+/// WS 帧，需要 cookie —— 因此连接时把 session 一并带上，别让驱动层再回头
+/// 查账号。
 pub struct TaskStream {
     socket: TaskSocket,
     pub task_id: String,
+    region: Region,
+    session: String,
+    /// 账号的出网代理（停止任务与建任务必须走同一个出口，见 `client::stop_task`）
+    proxy: Option<ResolvedProxy>,
+}
+
+impl TaskStream {
+    /// 只关连接、不停止任务（起始交互失败时用：停止由调用方统一做，
+    /// 见 `chat.rs` 的说明）。正常的收尾请用 `close_and_stop`。
+    pub async fn close(mut self) {
+        let _ = self.socket.close(None).await;
+    }
 }
 
 /// 连接任务流（`mode=new`：本请求新建任务轮次）。
@@ -103,10 +135,11 @@ pub struct TaskStream {
 ///   - 连不上 / DNS / TLS / 握手超时 → 502 / 504。
 ///
 /// ── 代理为什么不作用于 WS（如实说明）─────────────────────────
-/// `proxy` 在编排层的语义是「账号级出网代理」；本家**只有建任务那一次 HTTP
-/// 调用**经过它（reqwest 直连 egress 层）。任务流是 WebSocket，tokio-tungstenite
-/// 没有代理支持，参考实现（Node `ws`）同样不给任务流挂代理 —— 因此这里与
-/// 参考一致地直连，并在配了代理时留一条 verbose 记录，避免「以为走了代理」。
+/// `proxy` 在编排层的语义是「账号级出网代理」；本家**建任务与停止任务这两次
+/// HTTP 调用**经过它（reqwest 直连 egress 层）。任务流是 WebSocket，
+/// tokio-tungstenite 没有代理支持，参考实现（Node `ws`）同样不给任务流挂
+/// 代理 —— 因此这里与参考一致地直连，并在配了代理时留一条 verbose 记录，
+/// 避免「以为走了代理」。
 pub async fn connect(
     region: Region,
     credentials: &MonkeyCodeCredentials,
@@ -129,7 +162,7 @@ pub async fn connect(
     if proxy.is_some() {
         logging::verbose(
             "[MonkeyCode]",
-            "任务流 WebSocket 直连（账号代理只作用于建任务调用，与参考实现一致）",
+            "任务流 WebSocket 直连（账号代理只作用于建任务 / 停止任务，与参考实现一致）",
         );
     }
     let timeouts = crate::server::config::timeout_settings();
@@ -148,6 +181,9 @@ pub async fn connect(
     Ok(TaskStream {
         socket,
         task_id: task_id.to_string(),
+        region,
+        session: credentials.session.clone(),
+        proxy: proxy.cloned(),
     })
 }
 
@@ -255,13 +291,17 @@ async fn drive(
     mode: Mode<'_>,
     telemetry: &Arc<RequestTelemetry>,
 ) -> Result<Translator, GatewayError> {
+    // 取消兜底：future 被丢弃时补一次停止（见 `StopOnDrop` 的说明）。
+    // 正常出口都会 disarm，不会重复停止。
+    let mut stop_guard = StopOnDrop::new(&stream);
     let mut pending: Vec<Bytes> = Vec::new();
     if mode.is_stream() {
         if let Some(frame) = translator.role_frame() {
             pending.push(frame);
         }
         if !emit(&mode, &mut pending).await {
-            let _ = stream.socket.close(None).await;
+            close_and_stop(&mut stream).await;
+            stop_guard.disarm();
             return Err(GatewayError::with_status(499, "客户端已断开，任务流转发停止"));
         }
     }
@@ -331,7 +371,8 @@ async fn drive(
         }
         if !pending.is_empty() && !emit(&mode, &mut pending).await {
             // 客户端断开：它已经不收帧了，继续消费没有意义（参考 abort 分支同）
-            let _ = stream.socket.close(None).await;
+            close_and_stop(&mut stream).await;
+            stop_guard.disarm();
             return Err(GatewayError::with_status(499, "客户端已断开，任务流转发停止"));
         }
     };
@@ -342,7 +383,8 @@ async fn drive(
             }
             pending.extend(translator.finish_frames());
             let _ = emit(&mode, &mut pending).await;
-            let _ = stream.socket.close(None).await;
+            close_and_stop(&mut stream).await;
+            stop_guard.disarm();
             logging::verbose(
                 "[MonkeyCode]",
                 &format!(
@@ -362,9 +404,84 @@ async fn drive(
                 pending.push(Bytes::from_static(DONE_FRAME));
                 let _ = emit(&mode, &mut pending).await;
             }
-            let _ = stream.socket.close(None).await;
+            close_and_stop(&mut stream).await;
+            stop_guard.disarm();
             Err(GatewayError::with_status(502, message))
         }
+    }
+}
+
+/// 收尾：关掉 WS，**并停止上游任务**。
+///
+/// 四个终态出口（正常结束 / task-error / 断连 / 超时）与两处「客户端已断开」
+/// 全部走这里，一个都不能漏 —— 上游的并发额度按「`pending` + `processing`
+/// 的任务数」算，漏掉哪条路径都会让那个账号的槽位被占到 VM 空闲回收
+/// （默认 3 天），下一次请求就撞 10811（见 `client::stop_task` 的说明）。
+///
+/// 停止失败不影响本轮结论：`stop_task` 只返回 bool，不抛错。
+async fn close_and_stop(stream: &mut TaskStream) {
+    let _ = stream.socket.close(None).await;
+    // 先注销再停止：自愈路径要能看到「这个任务已经不归任何人管了」。
+    // 顺序其实两种都对（停止成功后任务本就不在运行中列表里），但先注销能
+    // 覆盖「停止请求失败、任务仍占着槽位」的情况 —— 那时下一次自愈应该能
+    // 把它当残留清掉。
+    super::inflight::unregister(&stream.task_id);
+    super::client::stop_task(
+        stream.region,
+        &stream.session,
+        &stream.task_id,
+        stream.proxy.as_ref(),
+    )
+    .await;
+}
+
+/// 兜底守卫：`drive` 的 future 被**丢弃**（后台任务被 abort、进程收尾、
+/// 上游提前 drop 了这条流）时，Drop 里补一次「停止任务」。
+///
+/// ── 为什么 `close_and_stop` 还不够 ──────────────────────────
+/// 那条路径只在「驱动循环正常跑到某个终态出口」时执行。如果 future 在中途
+/// 被取消（`JoinHandle::abort`、运行时关闭），栈上的局部变量直接析构，异步
+/// 收尾代码一行都不会跑 —— 任务就留在上游占着槽位。Drop 是同步的，只能
+/// 起一个后台任务去停（不等结果）；`armed` 由正常路径置位，避免重复停止。
+struct StopOnDrop {
+    region: Region,
+    session: String,
+    task_id: String,
+    proxy: Option<ResolvedProxy>,
+    armed: bool,
+}
+
+impl StopOnDrop {
+    fn new(stream: &TaskStream) -> Self {
+        Self {
+            region: stream.region,
+            session: stream.session.clone(),
+            task_id: stream.task_id.clone(),
+            proxy: stream.proxy.clone(),
+            armed: true,
+        }
+    }
+
+    /// 正常收尾已经停过了，取消兜底
+    fn disarm(&mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for StopOnDrop {
+    fn drop(&mut self) {
+        if !self.armed {
+            return;
+        }
+        super::inflight::unregister(&self.task_id);
+        let region = self.region;
+        let session = std::mem::take(&mut self.session);
+        let task_id = std::mem::take(&mut self.task_id);
+        let proxy = self.proxy.take();
+        // 同步上下文里不能 await：起一个后台任务去停，不等它
+        tokio::spawn(async move {
+            super::client::stop_task(region, &session, &task_id, proxy.as_ref()).await;
+        });
     }
 }
 

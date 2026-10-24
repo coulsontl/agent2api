@@ -76,14 +76,31 @@ const REQUEST_TIMEOUT_MS: u64 = 15_000;
 ///
 /// 上游拿它判「这个客户端够不够新」（`1004 ineligible` 就包含版本不达标），
 /// 活动也可能要求最低版本。参考实现把它做成配置项（`identity.appVersion`，
-/// 环境变量 `ZCODE_APP_VERSION` 可覆盖），默认值是 **ZCode 客户端当前版本**
-/// `3.14.0`。
+/// 环境变量 `ZCODE_APP_VERSION` 可覆盖），默认值取 **ZCode 客户端当前版本**。
 ///
 /// ★ 别拿参考项目自己的版本号（它 `package.json` 里那个 `4.6.9`）—— 那个数字
-/// 冒充不了客户端，`app_version` 与 `X-ZCode-App-Version` 都会对不上，症状是
+/// 无法以客户端形态通过校验，`app_version` 与 `X-ZCode-App-Version` 都会对不上，症状是
 /// 领取被判 `1004 ineligible`（而这看起来像「账号没资格」，极易误判）。
-/// 上游抬门槛时用户可以用环境变量覆盖，不必等发版。
-const DEFAULT_APP_VERSION: &str = "3.14.0";
+///
+/// ── 这个数字是**活动的入场门槛**，不是「随便填个新版本」──────────
+/// 2026-10-23 实测（`GET billing/preview`，匿名 + 稳定 `X-Device-Mid`，
+/// win32-x64 / darwin-arm64 / linux-x64 三个平台结果一致）：
+///
+/// | app_version | `data.plans` |
+/// |---|---|
+/// | 3.13.0 / 3.14.0 / 3.14.3 / 3.15.0 / 3.15.1 / 3.16.0 | `[]` |
+/// | 3.16.1 / 3.16.2 / 3.17.0 | 含 `zcode-v3-start-plan-1024` |
+///
+/// 上一期（2026-10-23 的 ZCode 1024 Dev Day，5 亿 token）的门槛落在
+/// 3.16.0 → 3.16.1 之间；旧值 `3.14.0` 拿到的是一份**空列表**（`code: 0`，
+/// 不是错误），于是症状是「活动明明在，我们却一个套餐都探不到」——
+/// 看起来像上游没这活动，实际是客户端被判太旧。
+///
+/// ★ 门槛会随每期活动上移。上游抬门槛时的表现**不是报错**，而是静默返回
+/// 空 `plans`，所以这张表要跟着官方 changelog（zcode.z.ai/cn/changelog）
+/// 一起更新；排障时也可以先用 `ZCODE_APP_VERSION` 环境变量试几个版本，
+/// 不必改代码重发版。
+const DEFAULT_APP_VERSION: &str = "3.16.2";
 
 /// 探测与领取的路径（参考实现 `client.ts` 的常量）
 const PREVIEW_PATH: &str = "/api/v1/zcode-plan/billing/preview";
